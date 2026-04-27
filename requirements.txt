@@ -1,0 +1,6 @@
+# 自动阅卷系统依赖
+pillow>=9.0.0
+pyautogui>=0.9.53
+tkinter
+zhipuai>=2.0.0
+

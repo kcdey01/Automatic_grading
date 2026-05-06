@@ -93,11 +93,15 @@ class AutoScoringSystem:
 
         while self.running:
             try:
+                # 检查是否已达到设定份数
+                if self.total_questions > 0 and self.question_count >= self.total_questions:
+                    print(f"已完成 {self.question_count} 份，达到设定数量，停止运行")
+                    break
                 self._process_one_question(self.question_count + 1)
                 self.question_count += 1
                 if self.total_questions > 0:
                     progress = (self.question_count / self.total_questions) * 100
-                    print(f"进度：{progress:.1f}%")
+                    print(f"进度：{progress:.1f}% ({self.question_count}/{self.total_questions})")
                 time.sleep(2)
             except KeyboardInterrupt:
                 self.running = False

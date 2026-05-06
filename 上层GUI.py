@@ -108,7 +108,7 @@ class App(tk.Tk):
         self.batch_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="批量模式", variable=self.batch_var, command=self._sync_batch_state).grid(row=0, column=0, sticky="w")
 
-        ttk.Label(mid, text="总题数(可选)").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Label(mid, text="总份数(可选)").grid(row=0, column=1, sticky="w", padx=(12, 0))
         self.total_var = tk.StringVar(value="0")
         self.total_entry = ttk.Entry(mid, textvariable=self.total_var, width=10, state="disabled")
         self.total_entry.grid(row=0, column=2, sticky="w", padx=(6, 0))
@@ -190,12 +190,6 @@ class App(tk.Tk):
             "base_url": cfg.get("base_url", ""),
             "extra_headers_json": cfg.get("extra_headers_json", ""),
             "filler_mode": cfg.get("filler_mode", ""),
-            "dom_target_url": cfg.get("dom_target_url", ""),
-            "dom_browser_mode": cfg.get("dom_browser_mode", ""),
-            "dom_cdp_url": cfg.get("dom_cdp_url", ""),
-            "dom_score_selector": cfg.get("dom_score_selector", ""),
-            "dom_submit_selector": cfg.get("dom_submit_selector", ""),
-            "dom_next_selector": cfg.get("dom_next_selector", ""),
         }
         return json.dumps(key_obj, ensure_ascii=False, sort_keys=True)
 
@@ -227,18 +221,6 @@ class App(tk.Tk):
 
         if "filler_mode" in cfg:
             pass
-        if "dom_target_url" in cfg:
-            self.dom_url_var.set(str(cfg["dom_target_url"]))
-        if "dom_browser_mode" in cfg:
-            self.dom_browser_mode_var.set(str(cfg["dom_browser_mode"]))
-        if "dom_cdp_url" in cfg:
-            self.dom_cdp_url_var.set(str(cfg["dom_cdp_url"]))
-        if "dom_score_selector" in cfg:
-            self.dom_score_selector_var.set(str(cfg["dom_score_selector"]))
-        if "dom_submit_selector" in cfg:
-            self.dom_submit_selector_var.set(str(cfg["dom_submit_selector"]))
-        if "dom_next_selector" in cfg:
-            self.dom_next_selector_var.set(str(cfg["dom_next_selector"]))
 
         self._sync_provider_state()
         self._sync_filler_state()
@@ -393,51 +375,6 @@ class App(tk.Tk):
             return
         sys.filler.select_next_button()
 
-    def _ensure_dom_picker(self) -> AutoFiller:
-        target_url = (self.dom_url_var.get() or "").strip()
-        browser_mode = "connect" if self.dom_browser_mode_var.get() == "连接已有浏览器(CDP)" else "launch"
-        cdp_url = (self.dom_cdp_url_var.get() or "").strip()
-        if browser_mode == "launch" and not target_url:
-            raise ValueError("请先填写页面URL(DOM)")
-        if browser_mode == "connect" and not cdp_url:
-            raise ValueError("连接已有浏览器时，请先填写 CDP 地址")
-        try:
-            import playwright  # noqa: F401
-        except Exception as e:
-            raise ValueError("缺少 playwright，请先执行 pip install playwright") from e
-
-        picker_key = json.dumps({"target_url": target_url, "browser_mode": browser_mode, "cdp_url": cdp_url}, ensure_ascii=False, sort_keys=True)
-        if self._dom_picker is not None and self._dom_picker_key == picker_key:
-            return self._dom_picker
-
-        if self._dom_picker is not None:
-            self._dom_picker.close()
-        self._dom_picker = AutoFiller(
-            self,
-            mode="dom",
-            config={"target_url": target_url, "browser_mode": browser_mode, "cdp_url": cdp_url},
-        )
-        self._dom_picker_key = picker_key
-        return self._dom_picker
-
-    def _pick_dom_selector_into(self, field_name: str, var: tk.StringVar):
-        try:
-            picker = self._ensure_dom_picker()
-            messagebox.showinfo("操作提示", f"浏览器会打开目标页面，请点击【{field_name}】对应元素。")
-            selector = picker.pick_selector(field_name)
-            var.set(selector)
-        except Exception as e:
-            messagebox.showerror("识别失败", str(e))
-
-    def _pick_dom_score_selector(self):
-        self._pick_dom_selector_into("分数输入框", self.dom_score_selector_var)
-
-    def _pick_dom_submit_selector(self):
-        self._pick_dom_selector_into("提交按钮", self.dom_submit_selector_var)
-
-    def _pick_dom_next_selector(self):
-        self._pick_dom_selector_into("下一题按钮", self.dom_next_selector_var)
-
     def _start(self):
         try:
             sys_ = self._ensure_system()
@@ -464,13 +401,13 @@ class App(tk.Tk):
                 if sys_.total_questions > 0:
                     self.progress_var.set(f"批量中：{sys_.question_count}/{sys_.total_questions}")
                 else:
-                    self.progress_var.set(f"批量中：已处理 {sys_.question_count} 题")
+                    self.progress_var.set(f"批量中：已处理 {sys_.question_count} 份")
             else:
                 self.progress_var.set("单题处理中…")
             self.after(350, self._poll_progress)
         else:
             if sys_.batch_mode:
-                self.progress_var.set(f"已停止（已处理 {sys_.question_count} 题）")
+                self.progress_var.set(f"已停止（已处理 {sys_.question_count} 份）")
             else:
                 self.progress_var.set("已完成（单题）")
 

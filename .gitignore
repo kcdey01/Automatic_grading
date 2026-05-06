@@ -1,0 +1,9 @@
+# 配置文件（含 API Key 等敏感信息）
+config.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 截图画布
+captures/

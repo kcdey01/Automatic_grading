@@ -42,6 +42,7 @@ class AutoScoringSystem:
         capture_dir=None,
         filler_mode="pyautogui",
         filler_config=None,
+        on_score_callback=None,
     ):
         self.screenshot_tool = ScreenshotTool()
         self.scorer = scorer if scorer is not None else ZhipuAIScorer(api_key, model)
@@ -54,6 +55,7 @@ class AutoScoringSystem:
         self.total_questions = 0
         self.capture_dir = Path(capture_dir) if capture_dir else Path(__file__).with_name("captures")
         self.capture_dir.mkdir(parents=True, exist_ok=True)
+        self.on_score_callback = on_score_callback
 
     def _process_one_question(self, question_index=None):
         image = self.screenshot_tool.capture_current_question()
@@ -70,6 +72,11 @@ class AutoScoringSystem:
             else:
                 print(f"题目 {question_index} 评分：{score}分")
             print(f"AI返回信息：{response_info['full_response']}")
+        if self.on_score_callback and response_info:
+            try:
+                self.on_score_callback(question_index, score, response_info)
+            except Exception as e:
+                print(f"[回调错误] {e}")
         self.filler.fill_score(score)
 
     def _handle_run_exception(self, error):

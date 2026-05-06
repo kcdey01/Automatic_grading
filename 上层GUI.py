@@ -19,6 +19,7 @@ import time
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer
 from modules.自动填分模块 import AutoFiller
+from modules.规则调优模块 import RuleTuner, ScoringRecord
 
 
 class _QueueStdout:
@@ -54,6 +55,9 @@ class App(tk.Tk):
         self.system: AutoScoringSystem | None = None
         self._system_cfg_key: str | None = None
         self._ui_thread_guard: threading.Lock = threading.Lock()
+        self.tuner = RuleTuner()
+        self._next_record_index = 0
+        self._tuning_running = False
 
         self._build_ui()
         self._load_config(silent=True)
@@ -139,6 +143,46 @@ class App(tk.Tk):
         self.progress_var = tk.StringVar(value="未开始")
         ttk.Label(runbox, textvariable=self.progress_var).grid(row=0, column=5, padx=12, pady=8, sticky="w")
 
+        # ── 规则调优 ──
+        tune_frame = ttk.LabelFrame(self, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
+        tune_frame.pack(fill=tk.BOTH, expand=False, **pad)
+
+        tune_top = ttk.Frame(tune_frame)
+        tune_top.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        tree_frame = ttk.Frame(tune_top)
+        tree_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        columns = ("序号", "AI分数", "正确分数", "状态")
+        self.tune_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=4)
+        for col in columns:
+            self.tune_tree.heading(col, text=col)
+        self.tune_tree.column("序号", width=50, anchor="center")
+        self.tune_tree.column("AI分数", width=70, anchor="center")
+        self.tune_tree.column("正确分数", width=70, anchor="center")
+        self.tune_tree.column("状态", width=80, anchor="center")
+        self.tune_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.tune_tree.bind("<<TreeviewSelect>>", self._on_tune_tree_select)
+
+        tune_btns = ttk.Frame(tune_top)
+        tune_btns.pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Label(tune_btns, text="正确分数:").pack(anchor="w")
+        self.tune_manual_var = tk.StringVar()
+        ttk.Entry(tune_btns, textvariable=self.tune_manual_var, width=8).pack(anchor="w", pady=2)
+        ttk.Button(tune_btns, text="标记", width=10, command=self._tune_mark_score).pack(anchor="w", pady=1)
+
+        tune_bar = ttk.Frame(tune_frame)
+        tune_bar.pack(fill=tk.X, padx=8, pady=(2, 4))
+        ttk.Button(tune_bar, text="规则调优（分析偏差→生成新规则）", command=self._run_tuning).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(tune_bar, text="应用新规则", command=self._apply_tuning).pack(side=tk.LEFT, padx=4)
+        ttk.Button(tune_bar, text="清空记录", command=self._clear_tuning).pack(side=tk.LEFT, padx=4)
+
+        self.tune_status_var = tk.StringVar(value="未收集评分记录")
+        ttk.Label(tune_bar, textvariable=self.tune_status_var).pack(side=tk.LEFT, padx=12)
+
+        self.tune_result_text = tk.Text(tune_frame, height=4, wrap="word", state="disabled")
+        self.tune_result_text.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # ── 日志 ──
         log_frame = ttk.LabelFrame(self, text="运行日志 / AI返回（自动滚动）")
         log_frame.pack(fill=tk.BOTH, expand=True, **pad)
 
@@ -354,6 +398,7 @@ class App(tk.Tk):
             capture_dir=str(self.capture_dir),
             filler_mode="pyautogui",
             filler_config={},
+            on_score_callback=self._tune_add_record,
         )
         self._system_cfg_key = new_key
 
@@ -469,6 +514,147 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(60, self._drain_log_queue)
+
+    # ── 规则调优方法 ──
+
+    def _tune_add_record(self, question_index, score, response_info):
+        """从评分回调线程接收记录（线程安全）"""
+        self.after(0, self._tune_add_record_ui, question_index, score, response_info)
+
+    def _tune_add_record_ui(self, question_index, score, response_info):
+        idx = self._next_record_index
+        self._next_record_index += 1
+        criteria = self.criteria_text.get("1.0", "end").strip()
+        record = ScoringRecord(
+            index=idx,
+            ai_score=score,
+            ai_response=response_info.get("full_response", ""),
+            criteria=criteria,
+        )
+        self.tuner.add_record(record)
+        self.tune_tree.insert("", "end", values=(idx, score, "—", "待标记"))
+        self._tune_update_status()
+
+    def _on_tune_tree_select(self, event):
+        sel = self.tune_tree.selection()
+        if sel:
+            item = self.tune_tree.item(sel[0])
+            vals = item["values"]
+            if vals:
+                self.tune_manual_var.set(str(vals[1]))  # 预设为 AI 分数
+
+    def _tune_mark_score(self):
+        sel = self.tune_tree.selection()
+        if not sel:
+            messagebox.showwarning("提示", "请先在列表中选择一条记录")
+            return
+        raw = self.tune_manual_var.get().strip()
+        if not raw:
+            messagebox.showwarning("提示", "请输入正确分数")
+            return
+        try:
+            manual = int(raw)
+        except ValueError:
+            messagebox.showerror("错误", "分数必须是整数")
+            return
+
+        item = self.tune_tree.item(sel[0])
+        idx = item["values"][0]
+        ok = self.tuner.set_manual_score(idx, manual)
+        if not ok:
+            return
+        # 更新 treeview
+        record = next(r for r in self.tuner.records if r.index == idx)
+        self.tune_tree.item(sel[0], values=(idx, record.ai_score, manual, record.status))
+        self._tune_update_status()
+
+    def _run_tuning(self):
+        if self._tuning_running:
+            return
+        criteria = self.criteria_text.get("1.0", "end").strip()
+        if not criteria:
+            messagebox.showwarning("提示", "请先填写评分标准再调优")
+            return
+        stats = self.tuner.get_stats()
+        if stats["mismatches"] == 0 and stats["marked"] < 2:
+            messagebox.showwarning("提示", f"已标记 {stats['marked']} 条，需要至少 1 条偏差记录（或 ≥2 条已标记记录）才能调优")
+            return
+
+        # 同步 tuner 的 API 配置
+        api_key = (self.api_key_var.get() or "").strip()
+        base_url = (self.base_url_var.get() or "").strip()
+        model = (self.model_var.get() or "").strip()
+        extra_headers_raw = (self.extra_headers_var.get() or "").strip()
+        extra_headers = {}
+        if extra_headers_raw:
+            try:
+                extra_headers = json.loads(extra_headers_raw)
+            except Exception:
+                pass
+        self.tuner.update_config(api_key=api_key, base_url=base_url, model=model, extra_headers=extra_headers)
+
+        self._tuning_running = True
+        self.tune_status_var.set("正在分析调优…")
+        self.tune_result_text.configure(state="normal")
+        self.tune_result_text.delete("1.0", "end")
+        self.tune_result_text.insert("1.0", "正在调用大模型分析评分偏差，请稍候…\n")
+        self.tune_result_text.configure(state="disabled")
+        self.update_idletasks()
+
+        def _do_tune():
+            try:
+                result = self.tuner.tune(criteria)
+                self.after(0, self._tune_done, result)
+            except Exception as e:
+                self.after(0, self._tune_error, str(e))
+
+        t = threading.Thread(target=_do_tune, daemon=True)
+        t.start()
+
+    def _tune_done(self, result):
+        self._tuning_running = False
+        self.tune_result_text.configure(state="normal")
+        self.tune_result_text.delete("1.0", "end")
+        if result is None:
+            self.tune_result_text.insert("1.0", "数据不足：需要至少 1 条偏差记录或 ≥2 条已标记记录。")
+        else:
+            self.tune_result_text.insert("1.0", result)
+        self.tune_result_text.configure(state="disabled")
+        self._tune_update_status()
+        if self.tuner.suggested_criteria:
+            messagebox.showinfo("规则调优", "调优完成！点击「应用新规则」可将优化后的规则写入评分标准。")
+
+    def _tune_error(self, err):
+        self._tuning_running = False
+        self.tune_result_text.configure(state="normal")
+        self.tune_result_text.delete("1.0", "end")
+        self.tune_result_text.insert("1.0", f"调优失败：{err}")
+        self.tune_result_text.configure(state="disabled")
+        self._tune_update_status()
+
+    def _apply_tuning(self):
+        if not self.tuner.suggested_criteria:
+            messagebox.showwarning("提示", "没有可用的优化规则，请先执行「规则调优」")
+            return
+        self.criteria_text.delete("1.0", "end")
+        self.criteria_text.insert("1.0", self.tuner.suggested_criteria)
+        messagebox.showinfo("成功", "优化后的评分标准已应用到评分标准输入框")
+        print("[规则调优] 已应用优化后的评分标准")
+
+    def _clear_tuning(self):
+        self.tuner.records.clear()
+        self.tuner.suggested_criteria = ""
+        self._next_record_index = 0
+        for item in self.tune_tree.get_children():
+            self.tune_tree.delete(item)
+        self.tune_result_text.configure(state="normal")
+        self.tune_result_text.delete("1.0", "end")
+        self.tune_result_text.configure(state="disabled")
+        self._tune_update_status()
+
+    def _tune_update_status(self):
+        stats = self.tuner.get_stats()
+        self.tune_status_var.set(f"共 {stats['total']} 条 | 已标记 {stats['marked']} 条 | 偏差 {stats['mismatches']} 条")
 
     def destroy(self):
         try:

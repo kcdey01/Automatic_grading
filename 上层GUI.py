@@ -66,7 +66,27 @@ class App(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
 
-        top = ttk.Frame(self)
+        # ── 可滚动容器 ──
+        self._canvas = tk.Canvas(self, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=scrollbar.set)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        inner = ttk.Frame(self._canvas)
+        self._canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _configure_inner(event):
+            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+            self._canvas.itemconfig(1, width=event.width)
+        inner.bind("<Configure>", _configure_inner)
+        self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfig(1, width=e.width))
+
+        def _on_mousewheel(event):
+            self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        top = ttk.Frame(inner)
         top.pack(fill=tk.X, **pad)
 
         ttk.Label(top, text="服务商").grid(row=0, column=0, sticky="w")
@@ -105,12 +125,12 @@ class App(tk.Tk):
         self.provider_var.trace_add("write", lambda *_: self._sync_provider_state())
         self._sync_provider_state()
 
-        criteria_frame = ttk.LabelFrame(self, text="评分标准（直接粘贴你的阅卷要求/评分细则）")
+        criteria_frame = ttk.LabelFrame(inner, text="评分标准（直接粘贴你的阅卷要求/评分细则）")
         criteria_frame.pack(fill=tk.BOTH, expand=False, **pad)
         self.criteria_text = tk.Text(criteria_frame, height=8, wrap="word")
         self.criteria_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        mid = ttk.Frame(self)
+        mid = ttk.Frame(inner)
         mid.pack(fill=tk.X, **pad)
 
         self.batch_var = tk.BooleanVar(value=False)
@@ -123,7 +143,7 @@ class App(tk.Tk):
 
 
 
-        btns = ttk.LabelFrame(self, text="一次性配置（第一次用需要点）")
+        btns = ttk.LabelFrame(inner, text="一次性配置（第一次用需要点）")
         btns.pack(fill=tk.X, **pad)
 
         ttk.Button(btns, text="选择截图区域", command=self._select_region).grid(row=0, column=0, padx=8, pady=8, sticky="w")
@@ -132,7 +152,7 @@ class App(tk.Tk):
         ttk.Button(btns, text="选择提交按钮", command=self._select_submit_btn).grid(row=0, column=3, padx=8, pady=8, sticky="w")
         ttk.Button(btns, text="选择下一题按钮", command=self._select_next_btn).grid(row=0, column=4, padx=8, pady=8, sticky="w")
 
-        runbox = ttk.LabelFrame(self, text="运行")
+        runbox = ttk.LabelFrame(inner, text="运行")
         runbox.pack(fill=tk.X, **pad)
         ttk.Button(runbox, text="开始（单题/批量）", command=self._start).grid(row=0, column=0, padx=8, pady=8, sticky="w")
         ttk.Button(runbox, text="停止", command=self._stop).grid(row=0, column=1, padx=8, pady=8, sticky="w")
@@ -144,7 +164,7 @@ class App(tk.Tk):
         ttk.Label(runbox, textvariable=self.progress_var).grid(row=0, column=5, padx=12, pady=8, sticky="w")
 
         # ── 规则调优 ──
-        tune_frame = ttk.LabelFrame(self, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
+        tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
         tune_frame.pack(fill=tk.BOTH, expand=False, **pad)
 
         tune_top = ttk.Frame(tune_frame)
@@ -183,10 +203,10 @@ class App(tk.Tk):
         self.tune_result_text.pack(fill=tk.X, padx=8, pady=(0, 4))
 
         # ── 日志 ──
-        log_frame = ttk.LabelFrame(self, text="运行日志 / AI返回（自动滚动）")
-        log_frame.pack(fill=tk.BOTH, expand=True, **pad)
+        log_frame = ttk.LabelFrame(inner, text="运行日志 / AI返回（自动滚动）")
+        log_frame.pack(fill=tk.X, **pad)
 
-        self.log_text = tk.Text(log_frame, wrap="word")
+        self.log_text = tk.Text(log_frame, wrap="word", height=12)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
 
         sb = ttk.Scrollbar(log_frame, command=self.log_text.yview)

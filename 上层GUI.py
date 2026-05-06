@@ -16,7 +16,8 @@ import sys
 import threading
 import time
 
-from 自动阅卷系统GUI import AutoScoringSystem, OpenAICompatibleScorer, check_dependencies
+from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
+from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer
 from modules.自动填分模块 import AutoFiller
 
 
@@ -65,12 +66,15 @@ class App(tk.Tk):
         top.pack(fill=tk.X, **pad)
 
         ttk.Label(top, text="服务商").grid(row=0, column=0, sticky="w")
-        self.provider_var = tk.StringVar(value="OpenAI兼容")
+        self.provider_var = tk.StringVar(value="OpenAI")
         ttk.Combobox(
             top,
             textvariable=self.provider_var,
-            width=12,
-            values=["OpenAI兼容", "智谱AI"],
+            width=14,
+            values=[
+                "OpenAI", "智谱AI", "阿里通义千问", "字节豆包",
+                "零一万物", "硅基流动", "百度千帆", "科大讯飞", "自定义"
+            ],
             state="readonly",
         ).grid(row=0, column=1, sticky="w", padx=(6, 0))
 
@@ -151,18 +155,45 @@ class App(tk.Tk):
     def _sync_filler_state(self):
         return
 
+    PROVIDER_PRESETS = {
+        "OpenAI":       ("https://api.openai.com",                          "gpt-4o-mini"),
+        "智谱AI":       ("",                                                "glm-4v"),
+        "阿里通义千问": ("https://dashscope.aliyuncs.com/compatible-mode/v1","qwen-vl-max"),
+        "字节豆包":     ("https://ark.cn-beijing.volces.com/api/v3",        "doubao-vision-pro-32k"),
+        "零一万物":     ("https://api.lingyiwanwu.com/v1",                  "yi-vision"),
+        "硅基流动":     ("https://api.siliconflow.cn/v1",                   "Qwen/Qwen2-VL-72B-Instruct"),
+        "百度千帆":     ("https://qianfan.baidubce.com",                    "ernie-4.0-8k"),
+        "科大讯飞":     ("",                                                "spark-v4.0"),
+        "自定义":       ("",                                                "gpt-4o-mini"),
+    }
+
     def _sync_provider_state(self):
         provider = self.provider_var.get()
+        preset = self.PROVIDER_PRESETS.get(provider)
+        if preset:
+            preset_url, preset_model = preset
+            self.base_url_var.set(preset_url)
+            if self.model_var.get().strip() in {"gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", ""}:
+                self.model_var.set(preset_model)
+
         if provider == "智谱AI":
             self.base_url_entry.configure(state="disabled")
             self.extra_headers_entry.configure(state="disabled")
-            if self.model_var.get().strip() in {"gpt-4o-mini", ""}:
-                self.model_var.set("glm-4v")
+        elif provider == "百度千帆":
+            self.base_url_entry.configure(state="disabled")
+            self.extra_headers_entry.configure(state="disabled")
+            print("百度千帆：API Key 请填写 API_Key:Secret_Key 格式")
+        elif provider == "科大讯飞":
+            self.base_url_entry.configure(state="disabled")
+            self.extra_headers_entry.configure(state="disabled")
+            print("科大讯飞：API Key 请填写 appId:apiKey:apiSecret 格式")
+        elif provider == "自定义":
+            self.base_url_entry.configure(state="normal")
+            self.extra_headers_entry.configure(state="normal")
+            self.base_url_var.set("")
         else:
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="normal")
-            if self.model_var.get().strip() in {"glm-4v", ""}:
-                self.model_var.set("gpt-4o-mini")
 
     def _collect_config(self) -> dict:
         return {
@@ -284,8 +315,18 @@ class App(tk.Tk):
 
         provider = self.provider_var.get()
         scorer = None
-        if provider == "OpenAI兼容":
+        if provider == "智谱AI":
+            scorer = ZhipuAIScorer(api_key=api_key, model=model)
+        elif provider == "百度千帆":
+            scorer = BaiduScorer(api_key=api_key, model=model)
+        elif provider == "科大讯飞":
+            scorer = XunfeiScorer(api_key=api_key, model=model)
+        else:
             base_url = (self.base_url_var.get() or "").strip()
+            if not base_url and provider != "自定义":
+                preset = self.PROVIDER_PRESETS.get(provider)
+                if preset:
+                    base_url = preset[0]
             extra_headers_raw = (self.extra_headers_var.get() or "").strip()
             extra_headers = {}
             if extra_headers_raw:

@@ -57,7 +57,11 @@ class RuleTuner:
         return False
 
     def _call_llm(self, prompt: str) -> str:
-        url = f"{self.base_url}/v1/chat/completions"
+        # base_url 可能已经包含版本号（例如 /v2），自动适配
+        if self.base_url.endswith("/v1") or self.base_url.endswith("/v2"):
+            url = f"{self.base_url}/chat/completions"
+        else:
+            url = f"{self.base_url}/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

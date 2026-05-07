@@ -8,8 +8,9 @@ python 上层GUI.py
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import filedialog, ttk, messagebox
 import json
+import os
 from pathlib import Path
 import queue
 import sys
@@ -59,9 +60,38 @@ class App(tk.Tk):
         self._next_record_index = 0
         self._tuning_running = False
 
+        self._build_menu()
         self._build_ui()
         self._load_config(silent=True)
         self.after(60, self._drain_log_queue)
+
+    def _build_menu(self):
+        menubar = tk.Menu(self, tearoff=0)
+        self.configure(menu=menubar)
+
+        # ── 文件 ──
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="保存配置", command=self._save_config)
+        file_menu.add_command(label="加载配置", command=lambda: self._load_config(silent=False))
+        file_menu.add_separator()
+        file_menu.add_command(label="清空截图目录", command=self._clear_captures)
+        menubar.add_cascade(label="文件", menu=file_menu)
+
+        # ── 配置 ──
+        cfg_menu = tk.Menu(menubar, tearoff=0)
+        cfg_menu.add_command(label="选择截图区域", command=self._select_region)
+        cfg_menu.add_command(label="测试截图", command=self._test_screenshot)
+        cfg_menu.add_separator()
+        cfg_menu.add_command(label="选择分数输入框", command=self._select_score_input)
+        cfg_menu.add_command(label="选择提交按钮", command=self._select_submit_btn)
+        cfg_menu.add_command(label="选择下一题按钮", command=self._select_next_btn)
+        menubar.add_cascade(label="截图配置", menu=cfg_menu)
+
+        # ── 生成 ──
+        gen_menu = tk.Menu(menubar, tearoff=0)
+        gen_menu.add_command(label="从截图生成评分标准", command=self._generate_criteria_from_screenshot)
+        gen_menu.add_command(label="从图片文件生成评分标准", command=self._generate_criteria_from_file)
+        menubar.add_cascade(label="生成", menu=gen_menu)
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
@@ -143,25 +173,14 @@ class App(tk.Tk):
 
 
 
-        btns = ttk.LabelFrame(inner, text="一次性配置（第一次用需要点）")
-        btns.pack(fill=tk.X, **pad)
-
-        ttk.Button(btns, text="选择截图区域", command=self._select_region).grid(row=0, column=0, padx=8, pady=8, sticky="w")
-        ttk.Button(btns, text="测试截图(显示到日志)", command=self._test_screenshot).grid(row=0, column=1, padx=8, pady=8, sticky="w")
-        ttk.Button(btns, text="选择分数输入框", command=self._select_score_input).grid(row=0, column=2, padx=8, pady=8, sticky="w")
-        ttk.Button(btns, text="选择提交按钮", command=self._select_submit_btn).grid(row=0, column=3, padx=8, pady=8, sticky="w")
-        ttk.Button(btns, text="选择下一题按钮", command=self._select_next_btn).grid(row=0, column=4, padx=8, pady=8, sticky="w")
-
         runbox = ttk.LabelFrame(inner, text="运行")
         runbox.pack(fill=tk.X, **pad)
         ttk.Button(runbox, text="开始（单题/批量）", command=self._start).grid(row=0, column=0, padx=8, pady=8, sticky="w")
         ttk.Button(runbox, text="停止", command=self._stop).grid(row=0, column=1, padx=8, pady=8, sticky="w")
         ttk.Button(runbox, text="清空日志", command=self._clear_log).grid(row=0, column=2, padx=8, pady=8, sticky="w")
-        ttk.Button(runbox, text="保存配置", command=self._save_config).grid(row=0, column=3, padx=8, pady=8, sticky="w")
-        ttk.Button(runbox, text="加载配置", command=lambda: self._load_config(silent=False)).grid(row=0, column=4, padx=8, pady=8, sticky="w")
 
         self.progress_var = tk.StringVar(value="未开始")
-        ttk.Label(runbox, textvariable=self.progress_var).grid(row=0, column=5, padx=12, pady=8, sticky="w")
+        ttk.Label(runbox, textvariable=self.progress_var).grid(row=0, column=3, padx=12, pady=8, sticky="w")
 
         # ── 规则调优 ──
         tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
@@ -524,6 +543,148 @@ class App(tk.Tk):
 
     def _clear_log(self):
         self.log_text.delete("1.0", "end")
+
+    def _clear_captures(self):
+        if not messagebox.askyesno("确认", "确定要清空截图目录中的所有文件吗？"):
+            return
+        try:
+            files = list(self.capture_dir.iterdir())
+            if not files:
+                messagebox.showinfo("提示", "截图目录已经是空的。")
+                return
+            count = 0
+            for f in files:
+                if f.is_file():
+                    f.unlink()
+                    count += 1
+            print(f"[清空截图] 已删除 {count} 个文件")
+        except Exception as e:
+            messagebox.showerror("清空失败", str(e))
+
+    # ── 生成评分标准 ──
+
+    def _generate_criteria_from_screenshot(self):
+        """从当前屏幕截图生成评分标准"""
+        try:
+            sys_ = self._ensure_system()
+        except Exception as e:
+            messagebox.showerror("配置不完整", str(e))
+            return
+        try:
+            img = sys_.screenshot_tool.capture_current_question()
+            if img is None:
+                raise ValueError("请先选择截图区域（菜单 截图配置 → 选择截图区域）")
+            path = self.capture_dir / f"__criteria_gen_{int(time.time())}.png"
+            img.save(path)
+            print(f"[生成评分标准] 已截图：{path}")
+            self._generate_criteria(path)
+        except Exception as e:
+            messagebox.showerror("截图失败", str(e))
+
+    def _generate_criteria_from_file(self):
+        """从图片文件生成评分标准"""
+        path = filedialog.askopenfilename(
+            title="选择题目图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        print(f"[生成评分标准] 已选择文件：{path}")
+        self._generate_criteria(path)
+
+    def _generate_criteria(self, image_path):
+        """核心方法：将图片发送给 AI，生成评分标准并填入文本框"""
+        api_key = (self.api_key_var.get() or "").strip()
+        model = (self.model_var.get() or "").strip()
+
+        if not api_key:
+            messagebox.showerror("配置不完整", "请先填写 API Key")
+            return
+        if not model:
+            messagebox.showerror("配置不完整", "请先填写模型")
+            return
+
+        provider = self.provider_var.get()
+
+        prompt = (
+            "你是一个考试命题和评分标准制定专家。\n\n"
+            "请根据这张题目图片，制定详细的阅卷评分标准。要求：\n"
+            "1. 明确指出各题/各小问的分值分布\n"
+            "2. 列出每个得分点和扣分标准\n"
+            "3. 评分标准要具体、可操作，方便AI对照评分\n"
+            "4. 严格按照以下格式输出（包括冒号和标题）：\n"
+            "\n"
+            "总分：<总分数>分\n"
+            "\n"
+            "评分细则：\n"
+            "<题号1> <分值>分。得分标准：<评分要点>\n"
+            "<题号2> <分值>分。扣分说明：<扣分标准>\n"
+            "\n"
+            "请直接输出评分标准，不要输出多余内容。\n"
+            "\n"
+            "另外，在评分细则的最后，加上以下格式要求（逐字保留）：\n"
+            "\n"
+            "---\n"
+            "评分时请以如下格式输出最终结果：\n"
+            "最终得分：X分"
+        )
+
+        print(f"[生成评分标准] 正在调用 AI（{provider}/{model}）…")
+
+        try:
+            # 先压缩图片，避免原始文件过大导致连接被重置
+            from PIL import Image
+            img = Image.open(image_path)
+            # RGBA/PA 转 RGB（JPEG 不支持 alpha）
+            if img.mode in ("RGBA", "P", "LA"):
+                img = img.convert("RGB")
+            max_dim = 2048
+            if max(img.size) > max_dim:
+                ratio = max_dim / max(img.size)
+                img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+            import io
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            temp_path = str(self.capture_dir / f"__criteria_compressed_{int(time.time())}.jpg")
+            with open(temp_path, "wb") as f:
+                f.write(buf.getvalue())
+            print(f"[生成评分标准] 图片已压缩：{os.path.getsize(temp_path) / 1024:.0f} KB")
+
+            # 复用现有评分器发送请求（已验证的工作路径，兼容所有服务商）
+            sys_ = self._ensure_system()
+            # 强制延长超时，避免长 prompt 推理中断
+            if hasattr(sys_.scorer, "timeout"):
+                sys_.scorer.timeout = 180
+            # 打印诊断信息
+            if hasattr(sys_.scorer, "base_url"):
+                print(f"[生成评分标准] 请求 URL 基础路径: {sys_.scorer.base_url}")
+
+            # 带重试的评分调用
+            last_err = None
+            for attempt in range(3):
+                try:
+                    sys_.scorer.grade_answer(temp_path, prompt)
+                    break
+                except Exception as retry_err:
+                    last_err = retry_err
+                    if attempt < 2:
+                        print(f"[生成评分标准] 第 {attempt+1} 次失败，2 秒后重试: {retry_err}")
+                        time.sleep(2)
+                    else:
+                        raise last_err
+
+            info = sys_.scorer.get_last_response()
+            if not info or not info.get("full_response", "").strip():
+                raise ValueError("AI 返回内容为空")
+            result = info["full_response"].strip()
+
+            self.criteria_text.delete("1.0", "end")
+            self.criteria_text.insert("1.0", result)
+            print(f"[生成评分标准] 已填入评分标准框 ({len(result)} 字)")
+            messagebox.showinfo("完成", "评分标准已生成并填入上方文本框。")
+
+        except Exception as e:
+            messagebox.showerror("生成失败", f"生成评分标准时出错：{e}")
 
     def _drain_log_queue(self):
         try:

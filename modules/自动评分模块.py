@@ -22,6 +22,27 @@ class BaseScorer:
     def extract_score(self, text):
         """提取分数，增强容错性"""
         text = text.strip()
+
+        # 优先级 0：明确的最终/总分表述（最高优先级，避免被中间小分干扰）
+        summary_patterns = [
+            r"最终得分[^=]*=\s*.*?(\d+)\.?\d*\s*分",
+            r"总分\s*[：:]\s*(\d+)\.?\d*\s*分",
+            r"最终.*?得\s*(\d+)\.?\d*\s*分",
+            r"[预估预计][得评]分\s*[：:]\s*(\d+)\.?\d*\s*分",
+            r"理论得分\s*[：:\s]*(\d+)\.?\d*\s*分",
+            r"合计\s*[：:\s]*(\d+)\.?\d*\s*分",
+            r"阅卷[结果分数]*\s*[：:\s]*(\d+)\.?\d*\s*分",
+            r"[=\u2248]\s*.*?(\d+)\.?\d*\s*分",  # 匹配 = 7分 / ≈ 7分 等格式
+        ]
+        for pattern in summary_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    if 0 <= score <= 150:
+                        return int(score)
+                except (ValueError, IndexError):
+                    continue
         
         # 优先级 1：明确的得分表述（带上下文约束）
         priority_patterns = [

@@ -11,11 +11,12 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import json
 import os
-from pathlib import Path
 import queue
+import requests
 import sys
 import threading
 import time
+from pathlib import Path
 
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer
@@ -221,6 +222,29 @@ class App(tk.Tk):
         self.tune_result_text = tk.Text(tune_frame, height=4, wrap="word", state="disabled")
         self.tune_result_text.pack(fill=tk.X, padx=8, pady=(0, 4))
 
+        # ── 快捷优化建议 ──
+        quick_frame = ttk.LabelFrame(inner, text="快捷优化建议（输入优化想法→AI分析→生成新评分标准）")
+        quick_frame.pack(fill=tk.X, **pad)
+
+        qf_top = ttk.Frame(quick_frame)
+        qf_top.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        ttk.Label(qf_top, text="优化建议：").pack(side=tk.LEFT)
+        self.optimize_suggestion_text = tk.Text(qf_top, height=3, wrap="word")
+        self.optimize_suggestion_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+        qf_btn_bar = ttk.Frame(quick_frame)
+        qf_btn_bar.pack(fill=tk.X, padx=8, pady=(4, 0))
+        self.optimize_btn = ttk.Button(qf_btn_bar, text="执行优化", command=self._optimize_criteria)
+        self.optimize_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self.apply_opt_btn = ttk.Button(qf_btn_bar, text="应用新规则", command=self._apply_optimized_criteria, state="disabled")
+        self.apply_opt_btn.pack(side=tk.LEFT, padx=4)
+        self.optimize_status_var = tk.StringVar(value="")
+        ttk.Label(qf_btn_bar, textvariable=self.optimize_status_var).pack(side=tk.LEFT, padx=12)
+
+        self.optimize_result_text = tk.Text(quick_frame, height=4, wrap="word", state="disabled")
+        self.optimize_result_text.pack(fill=tk.X, padx=8, pady=(0, 4))
+
         # ── 日志 ──
         log_frame = ttk.LabelFrame(inner, text="运行日志 / AI返回（自动滚动）")
         log_frame.pack(fill=tk.X, **pad)
@@ -242,7 +266,7 @@ class App(tk.Tk):
         "OpenAI":       ("https://api.openai.com",                          "gpt-4o-mini"),
         "智谱AI":       ("",                                                "glm-4v"),
         "阿里通义千问": ("https://dashscope.aliyuncs.com/compatible-mode/v1","qwen-vl-max"),
-        "字节豆包":     ("https://ark.cn-beijing.volces.com/api/v3",        "doubao-vision-pro-32k"),
+        "字节豆包":     ("https://ark.cn-beijing.volces.com/api/v3",        "doubao-seed-1-8-251228"),
         "零一万物":     ("https://api.lingyiwanwu.com/v1",                  "yi-vision"),
         "硅基流动":     ("https://api.siliconflow.cn/v1",                   "Qwen/Qwen2-VL-72B-Instruct"),
         "百度千帆":     ("https://qianfan.baidubce.com",                    "ernie-4.0-8k"),
@@ -836,6 +860,103 @@ class App(tk.Tk):
     def _tune_update_status(self):
         stats = self.tuner.get_stats()
         self.tune_status_var.set(f"共 {stats['total']} 条 | 已标记 {stats['marked']} 条 | 偏差 {stats['mismatches']} 条")
+
+    # ── 快捷优化评分标准 ──
+
+    def _optimize_criteria(self):
+        suggestion = self.optimize_suggestion_text.get("1.0", "end").strip()
+        if not suggestion:
+            messagebox.showwarning("提示", "请先输入优化建议")
+            return
+
+        criteria = self.criteria_text.get("1.0", "end").strip()
+        if not criteria:
+            messagebox.showwarning("提示", "请先填写评分标准")
+            return
+
+        api_key = (self.api_key_var.get() or "").strip()
+        if not api_key:
+            messagebox.showerror("配置不完整", "请先填写 API Key")
+            return
+
+        base_url = (self.base_url_var.get() or "").strip()
+        model = (self.model_var.get() or "").strip()
+        extra_headers_raw = (self.extra_headers_var.get() or "").strip()
+        extra_headers = {}
+        if extra_headers_raw:
+            try:
+                extra_headers = json.loads(extra_headers_raw)
+            except Exception:
+                pass
+
+        prompt = (
+            "你是一个专业的考试评分规则优化专家。\n\n"
+            f"## 当前评分规则\n{criteria}\n\n"
+            f"## 用户优化建议\n{suggestion}\n\n"
+            "## 任务\n"
+            "请根据用户的优化建议，改进上述评分规则。要求：\n"
+            "- 保留原有规则中合理的部分\n"
+            "- 只根据用户建议做针对性的修改\n"
+            "- 输出格式保持清晰、可读、可直接用于评分\n"
+            "- 不要添加无关的说明文字\n\n"
+            "直接输出优化后的完整评分规则。"
+        )
+
+        self.optimize_btn.configure(state="disabled")
+        self.optimize_status_var.set("正在调用 AI 优化，请稍候…")
+        self.optimize_result_text.configure(state="normal")
+        self.optimize_result_text.delete("1.0", "end")
+        self.optimize_result_text.insert("1.0", "正在分析并优化评分标准…\n")
+        self.optimize_result_text.configure(state="disabled")
+        self.apply_opt_btn.configure(state="disabled")
+        self.update_idletasks()
+
+        def _do_optimize():
+            try:
+                from modules.自动评分模块 import call_llm_text
+                result = call_llm_text(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    prompt=prompt,
+                    extra_headers=extra_headers,
+                    timeout=120,
+                )
+                self.after(0, self._optimize_done, result)
+            except Exception as e:
+                self.after(0, self._optimize_error, str(e))
+
+        t = threading.Thread(target=_do_optimize, daemon=True)
+        t.start()
+
+    def _optimize_done(self, result):
+        self.optimize_btn.configure(state="normal")
+        self.optimize_status_var.set("优化完成")
+        self.optimize_result_text.configure(state="normal")
+        self.optimize_result_text.delete("1.0", "end")
+        self.optimize_result_text.insert("1.0", result)
+        self.optimize_result_text.configure(state="disabled")
+        self.apply_opt_btn.configure(state="normal")
+        self._optimized_result = result
+        messagebox.showinfo("优化完成", "优化后的评分标准已生成，点击「应用新规则」可将其写入评分标准输入框。")
+
+    def _optimize_error(self, err):
+        self.optimize_btn.configure(state="normal")
+        self.optimize_status_var.set("优化失败")
+        self.optimize_result_text.configure(state="normal")
+        self.optimize_result_text.delete("1.0", "end")
+        self.optimize_result_text.insert("1.0", f"优化失败：{err}")
+        self.optimize_result_text.configure(state="disabled")
+        self.apply_opt_btn.configure(state="disabled")
+
+    def _apply_optimized_criteria(self):
+        result = getattr(self, "_optimized_result", "")
+        if not result:
+            messagebox.showwarning("提示", "没有可用的优化结果，请先执行「优化」")
+            return
+        self.criteria_text.delete("1.0", "end")
+        self.criteria_text.insert("1.0", result)
+        messagebox.showinfo("成功", "优化后的评分标准已应用到评分标准输入框")
 
     def destroy(self):
         try:

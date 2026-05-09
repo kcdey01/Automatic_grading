@@ -6,10 +6,84 @@
 """
 
 import base64
+import json
 import re
 import time
 
 import requests
+
+
+def _is_responses_api_endpoint(base_url: str) -> bool:
+    """检测是否为 Responses API 端点（火山引擎方舟等使用）"""
+    return "volces.com" in base_url
+
+
+def call_llm_text(
+    base_url: str, api_key: str, model: str, prompt: str,
+    extra_headers: dict | None = None, timeout: int = 120,
+) -> str:
+    """
+    通用文本 LLM 调用，自动适配标准 OpenAI Chat Completions 和 Responses API（火山引擎）。
+    返回 AI 回复文本。
+    """
+    base_url = (base_url or "").strip().rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    headers.update(extra_headers or {})
+
+    if _is_responses_api_endpoint(base_url):
+        url = f"{base_url}/responses"
+        payload = {
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                    ],
+                }
+            ],
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if not resp.ok:
+            try:
+                detail = resp.json()
+                print(f"[API错误 {resp.status_code}] {json.dumps(detail, ensure_ascii=False)}")
+            except Exception:
+                if resp.text:
+                    print(f"[API错误 {resp.status_code}] {resp.text[:500]}")
+        resp.raise_for_status()
+        data = resp.json()
+        # Responses API 返回格式：output[].content[].text
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                for content_item in item.get("content", []):
+                    if content_item.get("type") == "output_text":
+                        return content_item.get("text", "")
+        return ""
+    else:
+        if re.search(r"/v\d+$", base_url):
+            url = f"{base_url}/chat/completions"
+        else:
+            url = f"{base_url}/v1/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if not resp.ok:
+            try:
+                detail = resp.json()
+                print(f"[API错误 {resp.status_code}] {json.dumps(detail, ensure_ascii=False)}")
+            except Exception:
+                if resp.text:
+                    print(f"[API错误 {resp.status_code}] {resp.text[:500]}")
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"].get("content", "")
 
 
 class BaseScorer:
@@ -189,35 +263,71 @@ class OpenAICompatibleScorer(BaseScorer):
             image_data = image_file.read()
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
-        # base_url 可能已经包含版本号（例如 /v2），尽量自动适配
-        if self.base_url.endswith("/v1") or self.base_url.endswith("/v2"):
-            url = f"{self.base_url}/chat/completions"
-        else:
-            url = f"{self.base_url}/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         headers.update(self.extra_headers)
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": criteria},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                    ],
-                }
-            ],
-        }
+        if _is_responses_api_endpoint(self.base_url):
+            # 火山引擎方舟 Responses API（/api/v3/responses）
+            url = f"{self.base_url}/responses"
+            payload = {
+                "model": self.model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": criteria},
+                            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{base64_image}"},
+                        ],
+                    }
+                ],
+                "temperature": 0.3,
+            }
+        else:
+            # 标准 OpenAI Chat Completions
+            if re.search(r"/v\d+$", self.base_url):
+                url = f"{self.base_url}/chat/completions"
+            else:
+                url = f"{self.base_url}/v1/chat/completions"
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": criteria},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                        ],
+                    }
+                ],
+            }
 
         resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                detail = resp.json()
+                print(f"[API错误 {resp.status_code}] {json.dumps(detail, ensure_ascii=False)}")
+            except Exception:
+                if resp.text:
+                    print(f"[API错误 {resp.status_code}] {resp.text[:500]}")
+            resp.raise_for_status()
         data = resp.json()
 
-        result = data["choices"][0]["message"].get("content", "")
+        if _is_responses_api_endpoint(self.base_url):
+            # 解析 Responses API 返回格式
+            result = ""
+            for item in data.get("output", []):
+                if item.get("type") == "message":
+                    for content_item in item.get("content", []):
+                        if content_item.get("type") == "output_text":
+                            result = content_item.get("text", "")
+                            break
+                    if result:
+                        break
+        else:
+            result = data["choices"][0]["message"].get("content", "")
         score = self.extract_score(result)
 
         self.last_ai_response = {

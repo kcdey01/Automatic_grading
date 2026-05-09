@@ -5,9 +5,13 @@
 利用大模型分析评分记录，自动优化评分规则。
 """
 
+import re
 from typing import Optional
 
 import requests
+
+
+from modules.自动评分模块 import call_llm_text
 
 
 class ScoringRecord:
@@ -57,24 +61,14 @@ class RuleTuner:
         return False
 
     def _call_llm(self, prompt: str) -> str:
-        # base_url 可能已经包含版本号（例如 /v2），自动适配
-        if self.base_url.endswith("/v1") or self.base_url.endswith("/v2"):
-            url = f"{self.base_url}/chat/completions"
-        else:
-            url = f"{self.base_url}/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        headers.update(self.extra_headers)
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        return call_llm_text(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            prompt=prompt,
+            extra_headers=self.extra_headers,
+            timeout=120,
+        )
 
     def tune(self, original_criteria: str) -> Optional[str]:
         """执行规则调优，返回完整分析文本（含错误分析和优化后规则）"""

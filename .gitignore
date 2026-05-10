@@ -10,3 +10,6 @@ __pycache__/
 
 # 截图画布
 captures/
+
+# 虚拟环境
+venv/

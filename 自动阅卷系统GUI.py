@@ -47,6 +47,7 @@ class AutoScoringSystem:
         on_position_selected=None,
         before_capture=None,
         after_capture=None,
+        blank_threshold=15.0,
     ):
         self.screenshot_tool = ScreenshotTool(
             on_region_selected=on_region_selected,
@@ -64,15 +65,16 @@ class AutoScoringSystem:
         self.capture_dir = Path(capture_dir) if capture_dir else Path(__file__).with_name("captures")
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         self.on_score_callback = on_score_callback
+        self.blank_threshold = float(blank_threshold)
 
     @staticmethod
     def _is_blank_image(image_path: str, threshold: float = 15.0) -> bool:
         """检测图片是否接近空白（基于像素亮度标准差）。阈值 15 以下判定为空白。"""
-        from PIL import Image
-        import numpy as np
-        img = Image.open(image_path).convert("L")
-        pixels = np.array(img, dtype=np.float32)
-        return float(np.std(pixels)) < threshold
+        from PIL import Image, ImageStat
+
+        with Image.open(image_path) as img:
+            stat = ImageStat.Stat(img.convert("L"))
+        return float(stat.stddev[0]) < threshold
 
     def _process_one_question(self, question_index=None):
         image = self.screenshot_tool.capture_current_question()
@@ -81,8 +83,8 @@ class AutoScoringSystem:
         self.screenshot_tool.save_image(image, filename)
 
         # 空白卷检测：跳过 AI 节省开销，直接给 0 分
-        if self._is_blank_image(filename):
-            print(f"[空白检测] 题目 {qid} 截图接近空白，直接判定 0 分，跳过 AI 评分")
+        if self._is_blank_image(filename, threshold=self.blank_threshold):
+            print(f"[空白检测] 题目 {qid} 截图接近空白（阈值 {self.blank_threshold:.1f}），直接判定 0 分，跳过 AI 评分")
             self.filler.fill_score(0)
             return
 

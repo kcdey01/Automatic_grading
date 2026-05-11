@@ -203,10 +203,19 @@ class App(tk.Tk):
         self.total_entry = ttk.Entry(mid, textvariable=self.total_var, width=10, state="disabled")
         self.total_entry.grid(row=0, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(mid, text="截图区域").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.region_status_var = tk.StringVar(value="未选择")
-        ttk.Label(mid, textvariable=self.region_status_var).grid(row=1, column=1, columnspan=2, sticky="w", padx=(6, 0), pady=(4, 0))
-
+        ttk.Label(mid, text="空白阈值").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.blank_threshold_percent_var = tk.DoubleVar(value=37.5)
+        blank_scale = ttk.Scale(
+            mid,
+            from_=0,
+            to=100,
+            length=180,
+            variable=self.blank_threshold_percent_var,
+            command=self._on_blank_threshold_change,
+        )
+        blank_scale.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(4, 0))
+        self.blank_threshold_label_var = tk.StringVar(value="38%（越低越严格）")
+        ttk.Label(mid, textvariable=self.blank_threshold_label_var).grid(row=1, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
 
 
         runbox = ttk.LabelFrame(inner, text="运行")
@@ -303,6 +312,29 @@ class App(tk.Tk):
 
     def _sync_batch_state(self):
         self.total_entry.configure(state=("normal" if self.batch_var.get() else "disabled"))
+
+    def _get_blank_threshold(self) -> float:
+        try:
+            percent = max(0.0, min(100.0, float(self.blank_threshold_percent_var.get())))
+        except (TypeError, ValueError, tk.TclError):
+            return 15.0
+        return round(percent / 100.0 * 40.0, 1)
+
+    def _set_blank_threshold(self, threshold: float):
+        percent = max(0.0, min(100.0, float(threshold) / 40.0 * 100.0))
+        self.blank_threshold_percent_var.set(percent)
+
+    def _sync_blank_threshold_label(self):
+        try:
+            percent = round(max(0.0, min(100.0, float(self.blank_threshold_percent_var.get()))))
+        except (TypeError, ValueError, tk.TclError):
+            percent = 38
+        self.blank_threshold_label_var.set(f"{percent}%（越低越严格）")
+
+    def _on_blank_threshold_change(self, _value=None):
+        self._sync_blank_threshold_label()
+        if self.system is not None:
+            self.system.blank_threshold = self._get_blank_threshold()
 
     def _format_region_status(self, region):
         vals = self._normalize_number_list(region, 4)
@@ -526,6 +558,7 @@ class App(tk.Tk):
             "criteria": self.criteria_text.get("1.0", "end").strip(),
             "batch_mode": bool(self.batch_var.get()),
             "total_questions": self.total_var.get(),
+            "blank_threshold": self._get_blank_threshold(),
             "filler_mode": "pyautogui",
         }
         cfg.update(self._collect_runtime_config())
@@ -619,6 +652,13 @@ class App(tk.Tk):
         if "total_questions" in cfg:
             self.total_var.set(str(cfg["total_questions"]))
 
+        if "blank_threshold" in cfg:
+            try:
+                self._set_blank_threshold(float(cfg["blank_threshold"]))
+            except (TypeError, ValueError, tk.TclError):
+                self._set_blank_threshold(15.0)
+            self._sync_blank_threshold_label()
+
         if "filler_mode" in cfg:
             pass
 
@@ -672,6 +712,7 @@ class App(tk.Tk):
             if criteria:
                 self.system.criteria = criteria
             self.system.batch_mode = bool(self.batch_var.get())
+            self.system.blank_threshold = self._get_blank_threshold()
             if self.system.batch_mode:
                 try:
                     self.system.total_questions = int(self.total_var.get() or "0")
@@ -738,6 +779,7 @@ class App(tk.Tk):
             on_position_selected=self._on_position_selected,
             before_capture=self._before_capture,
             after_capture=self._after_capture,
+            blank_threshold=self._get_blank_threshold(),
         )
         self._system_cfg_key = new_key
         self._sync_runtime_config_to_system()

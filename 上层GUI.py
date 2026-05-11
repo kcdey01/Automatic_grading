@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
-from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer
+from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
 from modules.自动填分模块 import AutoFiller
 from modules.规则调优模块 import RuleTuner, ScoringRecord
 
@@ -56,7 +56,17 @@ class App(tk.Tk):
 
         self.system: AutoScoringSystem | None = None
         self._system_cfg_key: str | None = None
+        self._runtime_config = {
+            "screenshot_region_norm": None,
+            "score_input_pos": None,
+            "submit_btn_pos": None,
+            "next_btn_pos": None,
+        }
+        self._provider_notice_provider: str | None = None
         self._ui_thread_guard: threading.Lock = threading.Lock()
+        self._region_overlay: tk.Toplevel | None = None
+        self._region_overlay_canvas: tk.Canvas | None = None
+        self._region_overlay_visible = False
         self.tuner = RuleTuner()
         self._next_record_index = 0
         self._tuning_running = False
@@ -82,6 +92,8 @@ class App(tk.Tk):
         cfg_menu = tk.Menu(menubar, tearoff=0)
         cfg_menu.add_command(label="选择截图区域", command=self._select_region)
         cfg_menu.add_command(label="测试截图", command=self._test_screenshot)
+        cfg_menu.add_command(label="显示/刷新截图区域提示", command=self._show_region_overlay)
+        cfg_menu.add_command(label="隐藏截图区域提示", command=self._hide_region_overlay)
         cfg_menu.add_separator()
         cfg_menu.add_command(label="选择分数输入框", command=self._select_score_input)
         cfg_menu.add_command(label="选择提交按钮", command=self._select_submit_btn)
@@ -150,17 +162,20 @@ class App(tk.Tk):
 
         ttk.Label(top, text="模型").grid(row=1, column=0, sticky="w")
         self.model_var = tk.StringVar(value="gpt-4o-mini")
-        ttk.Entry(top, textvariable=self.model_var, width=25).grid(row=1, column=1, sticky="w", padx=(6, 0))
+        self.model_combo = ttk.Combobox(top, textvariable=self.model_var, width=25, values=[])
+        self.model_combo.grid(row=1, column=1, sticky="w", padx=(6, 0))
+        self.fetch_models_btn = ttk.Button(top, text="获取模型列表", command=self._fetch_models)
+        self.fetch_models_btn.grid(row=1, column=2, sticky="w", padx=(12, 0))
 
-        ttk.Label(top, text="base_url(OpenAI兼容)").grid(row=1, column=2, sticky="w", padx=(12, 0))
+        ttk.Label(top, text="base_url(OpenAI兼容)").grid(row=2, column=0, sticky="w")
         self.base_url_var = tk.StringVar(value="https://api.openai.com")
         self.base_url_entry = ttk.Entry(top, textvariable=self.base_url_var, width=35)
-        self.base_url_entry.grid(row=1, column=3, sticky="we", padx=(6, 0))
+        self.base_url_entry.grid(row=2, column=1, columnspan=3, sticky="we", padx=(6, 0))
 
-        ttk.Label(top, text="额外请求头JSON(可选)").grid(row=2, column=0, sticky="w")
+        ttk.Label(top, text="额外请求头JSON(可选)").grid(row=3, column=0, sticky="w")
         self.extra_headers_var = tk.StringVar(value="")
         self.extra_headers_entry = ttk.Entry(top, textvariable=self.extra_headers_var, width=90)
-        self.extra_headers_entry.grid(row=2, column=1, columnspan=3, sticky="we", padx=(6, 0))
+        self.extra_headers_entry.grid(row=3, column=1, columnspan=3, sticky="we", padx=(6, 0))
 
         top.columnconfigure(3, weight=1)
 
@@ -187,6 +202,10 @@ class App(tk.Tk):
         self.total_var = tk.StringVar(value="0")
         self.total_entry = ttk.Entry(mid, textvariable=self.total_var, width=10, state="disabled")
         self.total_entry.grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        ttk.Label(mid, text="截图区域").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.region_status_var = tk.StringVar(value="未选择")
+        ttk.Label(mid, textvariable=self.region_status_var).grid(row=1, column=1, columnspan=2, sticky="w", padx=(6, 0), pady=(4, 0))
 
 
 
@@ -285,11 +304,173 @@ class App(tk.Tk):
     def _sync_batch_state(self):
         self.total_entry.configure(state=("normal" if self.batch_var.get() else "disabled"))
 
+    def _format_region_status(self, region):
+        vals = self._normalize_number_list(region, 4)
+        if not vals:
+            return "未选择"
+        left, top, right, bottom = vals
+        return f"已选择：左{left:.4f} 上{top:.4f} 右{right:.4f} 下{bottom:.4f}"
+
+    def _update_region_status(self):
+        region = self._runtime_config.get("screenshot_region_norm")
+        if self.system is not None and self.system.screenshot_tool.selected_region_norm:
+            region = self.system.screenshot_tool.selected_region_norm
+        if hasattr(self, "region_status_var"):
+            self.region_status_var.set(self._format_region_status(region))
+        self._show_region_overlay(show_warning=False)
+
+    def _get_region_overlay_geometry(self):
+        region = self._runtime_config.get("screenshot_region_norm")
+        if self.system is not None and self.system.screenshot_tool.selected_region_norm:
+            region = self.system.screenshot_tool.selected_region_norm
+        vals = self._normalize_number_list(region, 4)
+        if not vals:
+            return None
+
+        try:
+            from PIL import ImageGrab
+            full = ImageGrab.grab(all_screens=True)
+            screen_w, screen_h = full.size
+        except Exception:
+            import pyautogui
+            screen_w, screen_h = pyautogui.size()
+
+        left, top, right, bottom = vals
+        x = int(max(0, min(screen_w - 1, left * screen_w)))
+        y = int(max(0, min(screen_h - 1, top * screen_h)))
+        width = int(max(1, min(screen_w, right * screen_w) - x))
+        height = int(max(1, min(screen_h, bottom * screen_h) - y))
+        return x, y, width, height
+
+    def _make_overlay_click_through(self, window):
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            hwnd = window.winfo_id()
+            user32 = ctypes.windll.user32
+            ex_style = user32.GetWindowLongW(hwnd, -20)
+            user32.SetWindowLongW(hwnd, -20, ex_style | 0x20 | 0x80000)
+        except Exception:
+            pass
+
+    def _show_region_overlay(self, show_warning: bool = True):
+        geometry = self._get_region_overlay_geometry()
+        if geometry is None:
+            if show_warning:
+                messagebox.showinfo("提示", "请先选择截图区域。")
+            self._hide_region_overlay()
+            return
+
+        x, y, width, height = geometry
+        if self._region_overlay is None or not self._region_overlay.winfo_exists():
+            self._region_overlay = tk.Toplevel(self)
+            self._region_overlay.overrideredirect(True)
+            self._region_overlay.attributes("-topmost", True)
+            try:
+                self._region_overlay.attributes("-alpha", 0.35)
+            except tk.TclError:
+                pass
+            self._region_overlay_canvas = tk.Canvas(
+                self._region_overlay,
+                bg="#2f80ed",
+                highlightthickness=3,
+                highlightbackground="#ff3b30",
+            )
+            self._region_overlay_canvas.pack(fill=tk.BOTH, expand=True)
+            self._make_overlay_click_through(self._region_overlay)
+
+        self._region_overlay.geometry(f"{width}x{height}+{x}+{y}")
+        self._region_overlay.deiconify()
+        self._region_overlay.lift()
+        self._region_overlay_visible = True
+
+    def _hide_region_overlay(self):
+        if self._region_overlay is not None and self._region_overlay.winfo_exists():
+            self._region_overlay.withdraw()
+        self._region_overlay_visible = False
+
+    def _before_capture(self):
+        if self._region_overlay is not None and self._region_overlay.winfo_exists():
+            self._region_overlay_visible = str(self._region_overlay.state()) != "withdrawn"
+            self._region_overlay.withdraw()
+            self.update_idletasks()
+            time.sleep(0.08)
+
+    def _after_capture(self):
+        if self._region_overlay_visible:
+            self.after(0, self._show_region_overlay)
+
     def _sync_filler_state(self):
         return
 
+    def _fetch_models(self):
+        provider = self.provider_var.get()
+        if provider in {"智谱AI", "百度千帆", "科大讯飞"}:
+            messagebox.showinfo("提示", f"{provider} 当前使用专用 SDK/接口，暂不支持自动获取模型列表。")
+            return
+
+        api_key = (self.api_key_var.get() or "").strip()
+        if not api_key:
+            messagebox.showerror("配置不完整", "请先填写 API Key")
+            return
+
+        base_url = (self.base_url_var.get() or "").strip()
+        if not base_url and provider != "自定义":
+            preset = self.PROVIDER_PRESETS.get(provider)
+            if preset:
+                base_url = preset[0]
+        if not base_url:
+            messagebox.showerror("配置不完整", "请先填写 base_url")
+            return
+
+        extra_headers_raw = (self.extra_headers_var.get() or "").strip()
+        extra_headers = {}
+        if extra_headers_raw:
+            try:
+                extra_headers = json.loads(extra_headers_raw)
+                if not isinstance(extra_headers, dict):
+                    raise ValueError("额外请求头必须是 JSON 对象")
+            except Exception as e:
+                messagebox.showerror("配置错误", f"额外请求头JSON解析失败：{e}")
+                return
+
+        self.fetch_models_btn.configure(state="disabled", text="获取中…")
+        print(f"[模型列表] 正在获取 {provider} 模型列表：{base_url}")
+
+        def _do_fetch():
+            try:
+                models = fetch_openai_compatible_models(
+                    base_url=base_url,
+                    api_key=api_key,
+                    extra_headers=extra_headers,
+                    timeout=30,
+                )
+                self.after(0, self._fetch_models_done, models)
+            except Exception as e:
+                self.after(0, self._fetch_models_error, str(e))
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _fetch_models_done(self, models: list[str]):
+        self.fetch_models_btn.configure(state="normal", text="获取模型列表")
+        if not models:
+            messagebox.showwarning("模型列表", "接口返回成功，但没有解析到模型 id。")
+            return
+        current = (self.model_var.get() or "").strip()
+        self.model_combo.configure(values=models)
+        if current not in models:
+            self.model_var.set(models[0])
+        print(f"[模型列表] 已获取 {len(models)} 个模型")
+        messagebox.showinfo("模型列表", f"已获取 {len(models)} 个模型，已填入模型下拉框。")
+
+    def _fetch_models_error(self, err: str):
+        self.fetch_models_btn.configure(state="normal", text="获取模型列表")
+        print(f"[模型列表] 获取失败：{err}")
+        messagebox.showerror("获取模型列表失败", err)
+
     PROVIDER_PRESETS = {
-        "OpenAI":       ("https://api.openai.com",                          "gpt-4o-mini"),
+        "OpenAI":       ("https://api.openai.com",                          "gpt-4o"),
         "智谱AI":       ("",                                                "glm-4v"),
         "阿里通义千问": ("https://dashscope.aliyuncs.com/compatible-mode/v1","qwen-vl-max"),
         "字节豆包":     ("https://ark.cn-beijing.volces.com/api/v3",        "doubao-seed-1-8-251228"),
@@ -297,7 +478,7 @@ class App(tk.Tk):
         "硅基流动":     ("https://api.siliconflow.cn/v1",                   "Qwen/Qwen2-VL-72B-Instruct"),
         "百度千帆":     ("https://qianfan.baidubce.com",                    "ernie-4.0-8k"),
         "科大讯飞":     ("",                                                "spark-v4.0"),
-        "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5"),
+        "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5-pro"),
         "自定义":       ("",                                                ""),
     }
 
@@ -307,7 +488,7 @@ class App(tk.Tk):
         if preset:
             preset_url, preset_model = preset
             self.base_url_var.set(preset_url)
-            if self.model_var.get().strip() in {"gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", "mimo-v2.5-pro", "doubao-seed-1-8-251228", ""}:
+            if self.model_var.get().strip() in {"gpt-4o", "gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", "mimo-v2.5-pro", "doubao-seed-1-8-251228", ""}:
                 self.model_var.set(preset_model)
 
         if provider == "智谱AI":
@@ -324,7 +505,9 @@ class App(tk.Tk):
         elif provider == "小米MiMo":
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="disabled")
-            print("小米MiMo：API Key 格式为 tp-xxxxx（Token Plan），请在订阅管理页面获取")
+            if self._provider_notice_provider != provider:
+                print("小米MiMo：API Key 格式为 tp-xxxxx（Token Plan），请在订阅管理页面获取")
+                self._provider_notice_provider = provider
         elif provider == "自定义":
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="normal")
@@ -334,7 +517,7 @@ class App(tk.Tk):
             self.extra_headers_entry.configure(state="normal")
 
     def _collect_config(self) -> dict:
-        return {
+        cfg = {
             "provider": self.provider_var.get(),
             "api_key": self.api_key_var.get(),
             "model": self.model_var.get(),
@@ -345,6 +528,54 @@ class App(tk.Tk):
             "total_questions": self.total_var.get(),
             "filler_mode": "pyautogui",
         }
+        cfg.update(self._collect_runtime_config())
+        return cfg
+
+    def _collect_runtime_config(self) -> dict:
+        cfg = dict(self._runtime_config)
+        if self.system is not None:
+            region = self.system.screenshot_tool.selected_region_norm
+            if region:
+                cfg["screenshot_region_norm"] = list(region)
+            if self.system.filler.score_input_pos:
+                cfg["score_input_pos"] = list(self.system.filler.score_input_pos)
+            if self.system.filler.submit_btn_pos:
+                cfg["submit_btn_pos"] = list(self.system.filler.submit_btn_pos)
+            if self.system.filler.next_btn_pos:
+                cfg["next_btn_pos"] = list(self.system.filler.next_btn_pos)
+        return cfg
+
+    def _normalize_number_list(self, value, length: int, as_int: bool = False):
+        if not isinstance(value, (list, tuple)) or len(value) != length:
+            return None
+        try:
+            vals = [int(v) if as_int else float(v) for v in value]
+        except (TypeError, ValueError):
+            return None
+        return vals
+
+    def _sync_runtime_config_to_system(self):
+        if self.system is None:
+            return
+        region = self._normalize_number_list(self._runtime_config.get("screenshot_region_norm"), 4)
+        if region:
+            self.system.screenshot_tool.selected_region_norm = tuple(region)
+        for key in ("score_input_pos", "submit_btn_pos", "next_btn_pos"):
+            pos = self._normalize_number_list(self._runtime_config.get(key), 2, as_int=True)
+            if pos:
+                setattr(self.system.filler, key, tuple(pos))
+        self._update_region_status()
+
+    def _on_region_selected(self, region):
+        self._runtime_config["screenshot_region_norm"] = list(region)
+        self._update_region_status()
+        self._save_config(silent=True)
+        print("[配置] 截图区域已保存到 config.json")
+
+    def _on_position_selected(self, attr_name, pos):
+        self._runtime_config[attr_name] = list(pos)
+        self._save_config(silent=True)
+        print(f"[配置] {attr_name} 已保存到 config.json")
 
     def _config_key_for_system(self) -> str:
         """
@@ -391,16 +622,26 @@ class App(tk.Tk):
         if "filler_mode" in cfg:
             pass
 
+        for key in ("screenshot_region_norm", "score_input_pos", "submit_btn_pos", "next_btn_pos"):
+            if key in cfg:
+                self._runtime_config[key] = cfg.get(key)
+
         self._sync_provider_state()
         self._sync_filler_state()
+        self._sync_runtime_config_to_system()
+        self._update_region_status()
 
-    def _save_config(self):
+    def _save_config(self, silent: bool = False):
         cfg = self._collect_config()
         try:
             self.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-            messagebox.showinfo("成功", f"配置已保存到：{self.config_path}")
+            if not silent:
+                messagebox.showinfo("成功", f"配置已保存到：{self.config_path}")
         except Exception as e:
-            messagebox.showerror("保存失败", str(e))
+            if silent:
+                print(f"保存配置失败：{e}")
+            else:
+                messagebox.showerror("保存失败", str(e))
 
     def _load_config(self, silent: bool):
         if not self.config_path.exists():
@@ -493,8 +734,13 @@ class App(tk.Tk):
             filler_mode="pyautogui",
             filler_config={},
             on_score_callback=self._tune_add_record,
+            on_region_selected=self._on_region_selected,
+            on_position_selected=self._on_position_selected,
+            before_capture=self._before_capture,
+            after_capture=self._after_capture,
         )
         self._system_cfg_key = new_key
+        self._sync_runtime_config_to_system()
 
         if batch_mode:
             try:

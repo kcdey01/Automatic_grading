@@ -13,3 +13,11 @@ captures/
 
 # 虚拟环境
 venv/
+__pycache__/自动阅卷系统GUI.cpython-314.pyc
+todo
+__pycache__/自动阅卷系统GUI.cpython-314.pyc
+modules/__pycache__/__init__.cpython-314.pyc
+__pycache__/自动阅卷系统GUI.cpython-314.pyc
+modules/__pycache__/自动截图模块.cpython-314.pyc
+modules/__pycache__/自动评分模块.cpython-314.pyc
+modules/__pycache__/自动填分模块.cpython-314.pyc

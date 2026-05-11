@@ -14,11 +14,26 @@ from PIL import ImageGrab, ImageTk
 class ScreenshotTool:
     """截图工具类"""
 
-    def __init__(self):
+    def __init__(self, on_region_selected=None, before_capture=None, after_capture=None):
         # 选区用“归一化比例”存储，避免 Windows 缩放/多屏导致的坐标偏移
         # 格式：(l, t, r, b) 均为 0~1 之间的浮点数
         self.selected_region_norm = None
+        self.on_region_selected = on_region_selected
+        self.before_capture = before_capture
+        self.after_capture = after_capture
         self.debug_print = False
+
+    def _grab_all_screens(self):
+        if self.before_capture:
+            self.before_capture()
+        try:
+            try:
+                return ImageGrab.grab(all_screens=True)
+            except Exception:
+                return pyautogui.screenshot()
+        finally:
+            if self.after_capture:
+                self.after_capture()
 
     def select_region_interactive(self, root):
         """交互式选择截图区域"""
@@ -86,6 +101,8 @@ class ScreenshotTool:
                 if self.debug_print:
                     print(f"选区(截图像素): ({left},{top})-({right},{bottom}) / 图片 {img_w}x{img_h}")
                     print(f"选区(归一化): {self.selected_region_norm}")
+                if self.on_region_selected:
+                    self.on_region_selected(self.selected_region_norm)
                 selection_window.destroy()
 
         def on_esc(event):
@@ -104,10 +121,7 @@ class ScreenshotTool:
         """截取用户选择的区域"""
         if self.selected_region_norm:
             # 每次都重新截“虚拟屏幕全域”，然后按比例裁剪，避免 DPI/多屏坐标误差
-            try:
-                full = ImageGrab.grab(all_screens=True)
-            except Exception:
-                full = pyautogui.screenshot()
+            full = self._grab_all_screens()
             w, h = full.size
             l, t, r, b = self.selected_region_norm
             left = int(max(0, min(w - 1, l * w)))
@@ -135,7 +149,13 @@ class ScreenshotTool:
         question_area = (100, 100, screen_width - 100, screen_height - 200)
         if self.debug_print:
             print(f"使用默认区域截图: {question_area}")
-        return pyautogui.screenshot(region=question_area)
+        if self.before_capture:
+            self.before_capture()
+        try:
+            return pyautogui.screenshot(region=question_area)
+        finally:
+            if self.after_capture:
+                self.after_capture()
 
     def enable_debug(self):
         self.debug_print = True

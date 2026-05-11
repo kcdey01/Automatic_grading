@@ -43,10 +43,18 @@ class AutoScoringSystem:
         filler_mode="pyautogui",
         filler_config=None,
         on_score_callback=None,
+        on_region_selected=None,
+        on_position_selected=None,
+        before_capture=None,
+        after_capture=None,
     ):
-        self.screenshot_tool = ScreenshotTool()
+        self.screenshot_tool = ScreenshotTool(
+            on_region_selected=on_region_selected,
+            before_capture=before_capture,
+            after_capture=after_capture,
+        )
         self.scorer = scorer if scorer is not None else ZhipuAIScorer(api_key, model)
-        self.filler = AutoFiller(root, mode=filler_mode, config=filler_config or {})
+        self.filler = AutoFiller(root, mode=filler_mode, config=filler_config or {}, on_position_selected=on_position_selected)
         self.criteria = criteria
         self.running = False
         self.thread = None
@@ -78,7 +86,13 @@ class AutoScoringSystem:
             self.filler.fill_score(0)
             return
 
-        score = self.scorer.grade_answer(filename, self.criteria)
+        try:
+            score = self.scorer.grade_answer(filename, self.criteria)
+        except Exception as e:
+            print(f"[评分失败] 题目 {qid} 评分超时或接口异常：{e}")
+            self.filler.fill_score(0)
+            return
+
         print(f"评分结果：{score}分")
         response_info = self.scorer.get_last_response()
         if response_info:

@@ -47,6 +47,48 @@ def _build_auth_headers(api_key: str, base_url: str = "", extra_headers: dict | 
     return headers
 
 
+def fetch_openai_compatible_models(
+    base_url: str,
+    api_key: str,
+    extra_headers: dict | None = None,
+    timeout: int = 30,
+) -> list[str]:
+    """从 OpenAI 兼容接口读取 /models，返回模型 id 列表。"""
+    base_url = (base_url or "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("base_url 不能为空")
+    if not api_key:
+        raise ValueError("api_key 不能为空")
+
+    headers = _build_auth_headers(api_key, base_url, extra_headers)
+    if re.search(r"/v\d+$", base_url):
+        url = f"{base_url}/models"
+    else:
+        url = f"{base_url}/v1/models"
+
+    resp = requests.get(url, headers=headers, timeout=timeout)
+    if not resp.ok:
+        try:
+            detail = resp.json()
+            print(f"[模型列表错误 {resp.status_code}] {json.dumps(detail, ensure_ascii=False)}")
+        except Exception:
+            if resp.text:
+                print(f"[模型列表错误 {resp.status_code}] {resp.text[:500]}")
+    resp.raise_for_status()
+    data = resp.json()
+
+    raw_models = data.get("data", []) if isinstance(data, dict) else []
+    model_ids = []
+    for item in raw_models:
+        if isinstance(item, dict):
+            model_id = item.get("id") or item.get("model") or item.get("name")
+        else:
+            model_id = str(item)
+        if model_id:
+            model_ids.append(str(model_id))
+    return sorted(set(model_ids), key=str.lower)
+
+
 def call_llm_text(
     base_url: str, api_key: str, model: str, prompt: str,
     extra_headers: dict | None = None, timeout: int = 120,
@@ -288,7 +330,7 @@ class OpenAICompatibleScorer(BaseScorer):
     兼容常见的 /v1/chat/completions 结构（含图文 messages）。
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, extra_headers=None, timeout=60):
+    def __init__(self, base_url: str, api_key: str, model: str, extra_headers=None, timeout=120):
         super().__init__(model=model)
         self.base_url = (base_url or "").strip().rstrip("/")
         self.api_key = (api_key or "").strip()
@@ -343,16 +385,39 @@ class OpenAICompatibleScorer(BaseScorer):
                 ],
             }
 
-        resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
-        if not resp.ok:
-            try:
-                detail = resp.json()
-                print(f"[API错误 {resp.status_code}] {json.dumps(detail, ensure_ascii=False)}")
-            except Exception:
-                if resp.text:
-                    print(f"[API错误 {resp.status_code}] {resp.text[:500]}")
-            resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+            if not resp.ok:
+                try:
+                    detail = resp.json()
+                    print(f"[API错误 {resp.status_code}] {json.dumps(detail, ensure_ascii=False)}")
+                except Exception:
+                    if resp.text:
+                        print(f"[API错误 {resp.status_code}] {resp.text[:500]}")
+                resp.raise_for_status()
+            data = resp.json()
+        except requests.exceptions.Timeout as e:
+            print(f"[API超时] {self.base_url} / {self.model}：{e}")
+            self.last_ai_response = {
+                "full_response": "",
+                "score": 0,
+                "model": self.model,
+                "timestamp": time.strftime("%H:%M:%S"),
+                "provider": "openai_compatible",
+                "error": "timeout",
+            }
+            return 0
+        except requests.RequestException as e:
+            print(f"[API请求失败] {self.base_url} / {self.model}：{e}")
+            self.last_ai_response = {
+                "full_response": "",
+                "score": 0,
+                "model": self.model,
+                "timestamp": time.strftime("%H:%M:%S"),
+                "provider": "openai_compatible",
+                "error": "request_exception",
+            }
+            return 0
 
         if _is_responses_api_endpoint(self.base_url):
             # 解析 Responses API 返回格式

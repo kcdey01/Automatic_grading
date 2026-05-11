@@ -15,10 +15,11 @@ import pyautogui
 class AutoFiller:
     """自动填分工具类"""
 
-    def __init__(self, root, mode="pyautogui", config=None):
+    def __init__(self, root, mode="pyautogui", config=None, on_position_selected=None):
         self.root = root
         self.mode = mode or "pyautogui"
         self.config = config or {}
+        self.on_position_selected = on_position_selected
         self.score_input_pos = None
         self.submit_btn_pos = None
         self.next_btn_pos = None
@@ -51,6 +52,8 @@ class AutoFiller:
         def on_click(event):
             x, y = event.x_root, event.y_root
             setattr(self, attr_name, (x, y))
+            if self.on_position_selected:
+                self.on_position_selected(attr_name, (x, y))
             selection_window.destroy()
             messagebox.showinfo("成功", f"{success_name}位置已选择: ({x}, {y})")
 

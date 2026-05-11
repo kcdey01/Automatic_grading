@@ -74,6 +74,8 @@ class App(tk.Tk):
         self._build_menu()
         self._build_ui()
         self._load_config(silent=True)
+        self._sync_batch_state()
+        self._update_ready_status()
         self.after(60, self._drain_log_queue)
 
     def _build_menu(self):
@@ -214,13 +216,19 @@ class App(tk.Tk):
             command=self._on_blank_threshold_change,
         )
         blank_scale.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(4, 0))
-        self.blank_threshold_label_var = tk.StringVar(value="38%（越低越严格）")
+        self.blank_threshold_label_var = tk.StringVar(value="38% 空白敏感度")
         ttk.Label(mid, textvariable=self.blank_threshold_label_var).grid(row=1, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
+        ttk.Label(mid, text="高=更容易判空白").grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(4, 0))
+        ttk.Button(mid, text="测试空白检测", command=self._test_blank_detection).grid(row=1, column=4, sticky="w", padx=(8, 0), pady=(4, 0))
+
+        self.ready_status_var = tk.StringVar(value="准备状态：未检查")
+        ttk.Label(mid, textvariable=self.ready_status_var).grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
 
         runbox = ttk.LabelFrame(inner, text="运行")
         runbox.pack(fill=tk.X, **pad)
-        ttk.Button(runbox, text="开始（单题/批量）", command=self._start).grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.start_btn = ttk.Button(runbox, text="开始单题阅卷", command=self._start)
+        self.start_btn.grid(row=0, column=0, padx=8, pady=8, sticky="w")
         ttk.Button(runbox, text="停止", command=self._stop).grid(row=0, column=1, padx=8, pady=8, sticky="w")
         ttk.Button(runbox, text="清空日志", command=self._clear_log).grid(row=0, column=2, padx=8, pady=8, sticky="w")
 
@@ -312,6 +320,9 @@ class App(tk.Tk):
 
     def _sync_batch_state(self):
         self.total_entry.configure(state=("normal" if self.batch_var.get() else "disabled"))
+        if hasattr(self, "start_btn"):
+            text = "开始批量阅卷" if self.batch_var.get() else "开始单题阅卷"
+            self.start_btn.configure(text=text)
 
     def _get_blank_threshold(self) -> float:
         try:
@@ -329,12 +340,29 @@ class App(tk.Tk):
             percent = round(max(0.0, min(100.0, float(self.blank_threshold_percent_var.get()))))
         except (TypeError, ValueError, tk.TclError):
             percent = 38
-        self.blank_threshold_label_var.set(f"{percent}%（越低越严格）")
+        self.blank_threshold_label_var.set(f"{percent}% 空白敏感度")
 
     def _on_blank_threshold_change(self, _value=None):
         self._sync_blank_threshold_label()
         if self.system is not None:
             self.system.blank_threshold = self._get_blank_threshold()
+
+    def _format_ready_item(self, label: str, ok: bool) -> str:
+        return f"{label}{'已设置' if ok else '未设置'}"
+
+    def _get_ready_status_text(self) -> str:
+        cfg = self._collect_runtime_config()
+        parts = [
+            self._format_ready_item("截图区域", bool(cfg.get("screenshot_region_norm"))),
+            self._format_ready_item("分数框", bool(cfg.get("score_input_pos"))),
+            self._format_ready_item("提交按钮", bool(cfg.get("submit_btn_pos"))),
+            self._format_ready_item("下一题按钮", bool(cfg.get("next_btn_pos"))),
+        ]
+        return "准备状态：" + " | ".join(parts)
+
+    def _update_ready_status(self):
+        if hasattr(self, "ready_status_var"):
+            self.ready_status_var.set(self._get_ready_status_text())
 
     def _format_region_status(self, region):
         vals = self._normalize_number_list(region, 4)
@@ -598,17 +626,18 @@ class App(tk.Tk):
             if pos:
                 setattr(self.system.filler, key, tuple(pos))
         self._update_region_status()
+        self._update_ready_status()
 
     def _on_region_selected(self, region):
         self._runtime_config["screenshot_region_norm"] = list(region)
         self._update_region_status()
-        self._save_config(silent=True)
-        print("[配置] 截图区域已保存到 config.json")
+        self._update_ready_status()
+        print("[配置] 截图区域已更新（尚未保存，点击 文件 → 保存配置 后写入 config.json）")
 
     def _on_position_selected(self, attr_name, pos):
         self._runtime_config[attr_name] = list(pos)
-        self._save_config(silent=True)
-        print(f"[配置] {attr_name} 已保存到 config.json")
+        self._update_ready_status()
+        print(f"[配置] {attr_name} 已更新（尚未保存，点击 文件 → 保存配置 后写入 config.json）")
 
     def _config_key_for_system(self) -> str:
         """
@@ -670,6 +699,7 @@ class App(tk.Tk):
         self._sync_filler_state()
         self._sync_runtime_config_to_system()
         self._update_region_status()
+        self._update_ready_status()
 
     def _save_config(self, silent: bool = False):
         cfg = self._collect_config()
@@ -816,6 +846,32 @@ class App(tk.Tk):
             img.save(path)
             print(f"[测试截图] 已保存：{path}  size={img.size}")
             messagebox.showinfo("完成", f"测试截图已保存：{path}")
+        except Exception as e:
+            messagebox.showerror("测试失败", str(e))
+
+    def _test_blank_detection(self):
+        try:
+            sys_ = self._ensure_system()
+        except Exception as e:
+            messagebox.showerror("配置不完整", str(e))
+            return
+
+        try:
+            img = sys_.screenshot_tool.capture_current_question()
+            if img is None:
+                raise ValueError("没有拿到截图，请先选择截图区域或检查截图权限。")
+            path = self.capture_dir / f"__blank_test_{int(time.time())}.png"
+            img.save(path)
+
+            from PIL import ImageStat
+            stat = ImageStat.Stat(img.convert("L"))
+            stddev = float(stat.stddev[0])
+            threshold = self._get_blank_threshold()
+            is_blank = stddev < threshold
+            result = "空白" if is_blank else "非空白"
+            msg = f"灰度波动：{stddev:.1f}\n当前阈值：{threshold:.1f}\n判定结果：{result}\n截图已保存：{path}"
+            print(f"[空白检测测试] 灰度波动={stddev:.1f} 阈值={threshold:.1f} 判定={result} 文件={path}")
+            messagebox.showinfo("空白检测测试", msg)
         except Exception as e:
             messagebox.showerror("测试失败", str(e))
 

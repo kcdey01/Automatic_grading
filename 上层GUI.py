@@ -128,7 +128,7 @@ class App(tk.Tk):
             width=14,
             values=[
                 "OpenAI", "智谱AI", "阿里通义千问", "字节豆包",
-                "零一万物", "硅基流动", "百度千帆", "科大讯飞", "自定义"
+                "零一万物", "硅基流动", "百度千帆", "科大讯飞", "小米MiMo", "自定义"
             ],
             state="readonly",
         ).grid(row=0, column=1, sticky="w", padx=(6, 0))
@@ -271,6 +271,7 @@ class App(tk.Tk):
         "硅基流动":     ("https://api.siliconflow.cn/v1",                   "Qwen/Qwen2-VL-72B-Instruct"),
         "百度千帆":     ("https://qianfan.baidubce.com",                    "ernie-4.0-8k"),
         "科大讯飞":     ("",                                                "spark-v4.0"),
+        "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5-pro"),
         "自定义":       ("",                                                "gpt-4o-mini"),
     }
 
@@ -280,7 +281,7 @@ class App(tk.Tk):
         if preset:
             preset_url, preset_model = preset
             self.base_url_var.set(preset_url)
-            if self.model_var.get().strip() in {"gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", ""}:
+            if self.model_var.get().strip() in {"gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", "mimo-v2.5-pro", "doubao-seed-1-8-251228", ""}:
                 self.model_var.set(preset_model)
 
         if provider == "智谱AI":
@@ -294,6 +295,10 @@ class App(tk.Tk):
             self.base_url_entry.configure(state="disabled")
             self.extra_headers_entry.configure(state="disabled")
             print("科大讯飞：API Key 请填写 appId:apiKey:apiSecret 格式")
+        elif provider == "小米MiMo":
+            self.base_url_entry.configure(state="normal")
+            self.extra_headers_entry.configure(state="disabled")
+            print("小米MiMo：API Key 格式为 tp-xxxxx（Token Plan），请在订阅管理页面获取")
         elif provider == "自定义":
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="normal")

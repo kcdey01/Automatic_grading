@@ -18,6 +18,25 @@ def _is_responses_api_endpoint(base_url: str) -> bool:
     return "volces.com" in base_url
 
 
+def _is_mimo_endpoint(base_url: str) -> bool:
+    """检测是否为小米 MiMo 平台"""
+    return "xiaomimimo.com" in base_url
+
+
+def _build_auth_headers(api_key: str, base_url: str = "", extra_headers: dict | None = None) -> dict:
+    """
+    根据平台构建认证头。
+    小米 MiMo 使用 api-key 头，其他平台使用标准 Bearer token。
+    """
+    headers = {"Content-Type": "application/json"}
+    if _is_mimo_endpoint(base_url):
+        headers["api-key"] = api_key
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(extra_headers or {})
+    return headers
+
+
 def call_llm_text(
     base_url: str, api_key: str, model: str, prompt: str,
     extra_headers: dict | None = None, timeout: int = 120,
@@ -27,11 +46,7 @@ def call_llm_text(
     返回 AI 回复文本。
     """
     base_url = (base_url or "").strip().rstrip("/")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    headers.update(extra_headers or {})
+    headers = _build_auth_headers(api_key, base_url, extra_headers)
 
     if _is_responses_api_endpoint(base_url):
         url = f"{base_url}/responses"
@@ -263,11 +278,7 @@ class OpenAICompatibleScorer(BaseScorer):
             image_data = image_file.read()
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        headers.update(self.extra_headers)
+        headers = _build_auth_headers(self.api_key, self.base_url, self.extra_headers)
 
         if _is_responses_api_endpoint(self.base_url):
             # 火山引擎方舟 Responses API（/api/v3/responses）

@@ -5,9 +5,11 @@
 ## 功能特点
 
 - **截图识别**：自动截取题目区域，调用 AI 视觉模型识别和评分
-- **智能评分**：支持多家 AI 服务商（OpenAI、智谱 AI、通义千问、豆包、百度千帆、科大讯飞等），自定义评分标准
+- **智能评分**：支持多家 AI 服务商（OpenAI、智谱 AI、通义千问、豆包、百度千帆、科大讯飞、小米 MiMo 等），自定义评分标准
+- **多协议适配**：自动适配 OpenAI Chat Completions、火山引擎 Responses API、小米 MiMo `api-key` 认证等不同协议
 - **自动生成评分标准**：支持从截图或上传题目图片，由 AI 自动生成评分标准并填入文本框，带结构化输出格式
 - **规则调优**：收集 AI 评分记录，人工标记正确分数后利用大模型自动分析偏差模式，生成优化后的评分规则，一键应用
+- **快捷优化建议**：输入优化想法，AI 分析后直接生成新评分标准，无需收集评分记录
 - **自动填分**：基于坐标点击的自动填分，支持分数输入框、提交按钮、下一题按钮
 - **批量处理**：支持批量阅卷，可设置总份数并自动停止
 - **菜单栏操作**：所有低频操作（截图配置、配置保存、清空截图目录）移至菜单栏，主界面只保留核心操作
@@ -38,11 +40,11 @@ pip install -r requirements.txt
 ```
 
 依赖包：
-- Pillow >= 9.0.0（图像处理）
-- pyautogui >= 0.9.53（自动化控制）
+- Pillow >= 10.0.0（图像处理）
+- pyautogui >= 0.9.54（自动化控制）
 - tkinter（GUI，Python 内置）
-- requests（HTTP 请求）
-- zhipuai >= 2.0.0（智谱 AI SDK，仅选用智谱时安装）
+- requests >= 2.31.0（HTTP 请求）
+- zhipuai >= 2.1.0（智谱 AI SDK，仅选用智谱时安装）
 
 ## 使用方法
 
@@ -55,13 +57,14 @@ python 上层GUI.py
 ### 配置步骤
 
 1. **选择 AI 服务商**
-   - 从下拉列表中选择：OpenAI、智谱 AI、阿里通义千问、字节豆包、零一万物、硅基流动、百度千帆、科大讯飞、自定义
+   - 从下拉列表中选择：OpenAI、智谱 AI、阿里通义千问、字节豆包、零一万物、硅基流动、百度千帆、科大讯飞、小米 MiMo、自定义
    - 选定后自动填入 base_url 和建议模型，用户可继续编辑
 
 2. **填写 API Key**
    - 标准服务商：直接填写 API Key
    - 百度千帆：填写 `API_Key:Secret_Key` 格式
    - 科大讯飞：填写 `appId:apiKey:apiSecret` 格式
+   - 小米 MiMo：填写 Token Plan API Key（格式 `tp-xxxxx`）
 
 3. **设置评分标准**
    - 示例：`标准答案：18.（1）-4；（2）9又九分之四。请根据标准答案评分，不要返回具体评分细节，只返回总分`
@@ -89,19 +92,37 @@ python 上层GUI.py
    - 查看分析结果和优化后的评分规则
    - 点击「应用新规则」将优化后的规则写入评分标准输入框
 
+8. **快捷优化建议（可选）**
+   - 在「快捷优化建议」文本框输入优化想法
+   - 点击「执行优化」，AI 分析后生成优化后的评分标准
+   - 点击「应用新规则」将结果写入评分标准输入框
+
 ## 支持的 AI 服务商
 
-| 服务商 | base_url 预设 | 默认模型 | 评分器 |
-|---|---|---|---|
-| OpenAI | api.openai.com | gpt-4o-mini | OpenAI 兼容 |
-| 智谱 AI | (SDK) | glm-4v | 智谱 SDK |
-| 阿里通义千问 | dashscope.aliyuncs.com/compatible-mode/v1 | qwen-vl-max | OpenAI 兼容 |
-| 字节豆包 | ark.cn-beijing.volces.com/api/v3 | doubao-vision-pro-32k | OpenAI 兼容 |
-| 零一万物 | api.lingyiwanwu.com/v1 | yi-vision | OpenAI 兼容 |
-| 硅基流动 | api.siliconflow.cn/v1 | Qwen/Qwen2-VL-72B-Instruct | OpenAI 兼容 |
-| 百度千帆 | qianfan.baidubce.com | ernie-4.0-8k | 自定义（access_token 鉴权） |
-| 科大讯飞 | (签名认证) | spark-v4.0 | 自定义（HMAC-SHA256 签名） |
-| 自定义 | 用户填写 | gpt-4o-mini | OpenAI 兼容 |
+| 服务商 | base_url 预设 | 默认模型 | 认证方式 | 协议 |
+|---|---|---|---|---|
+| OpenAI | api.openai.com | gpt-4o-mini | Bearer token | OpenAI Chat Completions |
+| 智谱 AI | (SDK) | glm-4v | 智谱 SDK | 智谱 SDK |
+| 阿里通义千问 | dashscope.aliyuncs.com/compatible-mode/v1 | qwen-vl-max | Bearer token | OpenAI Chat Completions |
+| 字节豆包 | ark.cn-beijing.volces.com/api/v3 | doubao-seed-1-8-251228 | Bearer token | 火山引擎 Responses API |
+| 零一万物 | api.lingyiwanwu.com/v1 | yi-vision | Bearer token | OpenAI Chat Completions |
+| 硅基流动 | api.siliconflow.cn/v1 | Qwen/Qwen2-VL-72B-Instruct | Bearer token | OpenAI Chat Completions |
+| 百度千帆 | qianfan.baidubce.com | ernie-4.0-8k | access_token | 自定义（access_token 鉴权） |
+| 科大讯飞 | (签名认证) | spark-v4.0 | HMAC-SHA256 签名 | 自定义（签名认证） |
+| 小米 MiMo | token-plan-cn.xiaomimimo.com/v1 | mimo-v2.5-pro | api-key | OpenAI Chat Completions |
+| 自定义 | 用户填写 | gpt-4o-mini | Bearer token | OpenAI Chat Completions |
+
+### 小米 MiMo 说明
+
+小米 MiMo 使用 Token Plan 订阅模式，需注意：
+
+- **API Key 格式**：`tp-xxxxx`（Token Plan 专用，与按量付费的 `sk-xxxxx` 不可混用）
+- **认证方式**：使用 `api-key` 请求头（非标准 Bearer token）
+- **集群选择**：可选中国/新加坡/欧洲集群，base_url 分别为：
+  - 中国：`https://token-plan-cn.xiaomimimo.com/v1`
+  - 新加坡：`https://token-plan-sgp.xiaomimimo.com/v1`
+  - 欧洲：`https://token-plan-ams.xiaomimimo.com/v1`
+- **订阅管理**：前往 [MiMo 订阅管理](https://platform.xiaomimimo.com) 获取 API Key
 
 > 评分器均支持多模态图片理解，需选用支持 vision 的模型。
 
@@ -136,12 +157,21 @@ python 上层GUI.py
 |------|----------|
 | `No module named 'requests'` | `pip install requests` |
 | API 连接失败 | 检查 API Key、网络连接、模型名称 |
+| 火山引擎 403 | 检查方舟平台账户余额（日志会打印详细错误信息） |
+| 小米 MiMo 认证失败 | 确认 API Key 格式为 `tp-xxxxx`，且订阅未过期 |
 | 图片识别失败 | 检查截图区域、图片清晰度、评分标准 |
 | 填分失败 | 检查按钮位置配置 |
 | 批量模式不停止 | 检查总份数是否设置为大于 0 |
 
 ## 更新日志
 
+- **2026-05-09**：新增小米 MiMo 支持与火山引擎 Responses API 适配
+  - 新增小米 MiMo 服务商（Token Plan 模式，`api-key` 认证头）
+  - 适配火山引擎方舟 Responses API（`/api/v3/responses`），请求/响应格式自动切换
+  - 统一 LLM 调用函数 `call_llm_text`，自动适配不同协议
+  - 新增 API 错误响应体日志打印，便于诊断 403 等问题
+  - 更新字节豆包默认模型为 `doubao-seed-1-8-251228`
+  - 修复 URL 拼接逻辑，支持 `/v3` 等版本号
 - **2026-05-07**：菜单栏优化与自动生成评分标准
   - 新增菜单栏，将截图配置、保存/加载配置、清空截图目录等低频操作移至菜单
   - 主界面 runbox 精简为：开始、停止、清空日志、进度状态
@@ -149,6 +179,7 @@ python 上层GUI.py
   - 生成评分标准时自动压缩图片、添加结构化输出格式，提高 AI 识别率
   - extract_score 增加「预估得分」「最终得分」等摘要模式，优先匹配总分而非中间小分
   - 评分标准末尾自动追加输出格式指令，AI 评分响应以「最终得分：X分」收尾
+  - 新增「快捷优化建议」面板，输入优化想法即可 AI 生成新评分标准
 - **2026-05-06**：新增规则调优功能与可滚动界面
   - 新增规则调优模块，自动收集评分记录，利用大模型分析偏差模式生成优化后的评分规则，支持一键应用
   - AutoScoringSystem 新增 on_score_callback 回调钩子，每次评分后自动记录

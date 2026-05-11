@@ -114,6 +114,17 @@ class App(tk.Tk):
         self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfig(1, width=e.width))
 
         def _on_mousewheel(event):
+            # 当鼠标悬停在带滚动条的 Text 控件上时，不触发 Canvas 滚动
+            w = event.widget
+            while w is not None:
+                if isinstance(w, tk.Text):
+                    try:
+                        if w.cget("yscrollcommand") != "":
+                            return  # 该 Text 有自己的滚动条，跳过 Canvas 滚动
+                    except tk.TclError:
+                        pass
+                    break
+                w = w.master if hasattr(w, "master") else None
             self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
         self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
@@ -158,8 +169,13 @@ class App(tk.Tk):
 
         criteria_frame = ttk.LabelFrame(inner, text="评分标准（直接粘贴你的阅卷要求/评分细则）")
         criteria_frame.pack(fill=tk.BOTH, expand=False, **pad)
-        self.criteria_text = tk.Text(criteria_frame, height=8, wrap="word")
-        self.criteria_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        _criteria_inner = ttk.Frame(criteria_frame)
+        _criteria_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.criteria_text = tk.Text(_criteria_inner, height=8, wrap="word")
+        _criteria_sb = ttk.Scrollbar(_criteria_inner, command=self.criteria_text.yview)
+        self.criteria_text.configure(yscrollcommand=_criteria_sb.set)
+        _criteria_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.criteria_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         mid = ttk.Frame(inner)
         mid.pack(fill=tk.X, **pad)
@@ -219,8 +235,13 @@ class App(tk.Tk):
         self.tune_status_var = tk.StringVar(value="未收集评分记录")
         ttk.Label(tune_bar, textvariable=self.tune_status_var).pack(side=tk.LEFT, padx=12)
 
-        self.tune_result_text = tk.Text(tune_frame, height=4, wrap="word", state="disabled")
-        self.tune_result_text.pack(fill=tk.X, padx=8, pady=(0, 4))
+        _tune_result_inner = ttk.Frame(tune_frame)
+        _tune_result_inner.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self.tune_result_text = tk.Text(_tune_result_inner, height=4, wrap="word", state="disabled")
+        _tune_result_sb = ttk.Scrollbar(_tune_result_inner, command=self.tune_result_text.yview)
+        self.tune_result_text.configure(yscrollcommand=_tune_result_sb.set)
+        _tune_result_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tune_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── 快捷优化建议 ──
         quick_frame = ttk.LabelFrame(inner, text="快捷优化建议（输入优化想法→AI分析→生成新评分标准）")
@@ -242,8 +263,13 @@ class App(tk.Tk):
         self.optimize_status_var = tk.StringVar(value="")
         ttk.Label(qf_btn_bar, textvariable=self.optimize_status_var).pack(side=tk.LEFT, padx=12)
 
-        self.optimize_result_text = tk.Text(quick_frame, height=4, wrap="word", state="disabled")
-        self.optimize_result_text.pack(fill=tk.X, padx=8, pady=(0, 4))
+        _opt_result_inner = ttk.Frame(quick_frame)
+        _opt_result_inner.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self.optimize_result_text = tk.Text(_opt_result_inner, height=4, wrap="word", state="disabled")
+        _opt_result_sb = ttk.Scrollbar(_opt_result_inner, command=self.optimize_result_text.yview)
+        self.optimize_result_text.configure(yscrollcommand=_opt_result_sb.set)
+        _opt_result_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.optimize_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── 日志 ──
         log_frame = ttk.LabelFrame(inner, text="运行日志 / AI返回（自动滚动）")
@@ -271,8 +297,8 @@ class App(tk.Tk):
         "硅基流动":     ("https://api.siliconflow.cn/v1",                   "Qwen/Qwen2-VL-72B-Instruct"),
         "百度千帆":     ("https://qianfan.baidubce.com",                    "ernie-4.0-8k"),
         "科大讯飞":     ("",                                                "spark-v4.0"),
-        "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5-pro"),
-        "自定义":       ("",                                                "gpt-4o-mini"),
+        "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5"),
+        "自定义":       ("",                                                ""),
     }
 
     def _sync_provider_state(self):
@@ -635,28 +661,44 @@ class App(tk.Tk):
 
         provider = self.provider_var.get()
 
-        prompt = (
-            "你是一个考试命题和评分标准制定专家。\n\n"
-            "请根据这张题目图片，制定详细的阅卷评分标准。要求：\n"
-            "1. 明确指出各题/各小问的分值分布\n"
-            "2. 列出每个得分点和扣分标准\n"
-            "3. 评分标准要具体、可操作，方便AI对照评分\n"
-            "4. 严格按照以下格式输出（包括冒号和标题）：\n"
-            "\n"
-            "总分：<总分数>分\n"
-            "\n"
-            "评分细则：\n"
-            "<题号1> <分值>分。得分标准：<评分要点>\n"
-            "<题号2> <分值>分。扣分说明：<扣分标准>\n"
-            "\n"
-            "请直接输出评分标准，不要输出多余内容。\n"
-            "\n"
-            "另外，在评分细则的最后，加上以下格式要求（逐字保留）：\n"
-            "\n"
-            "---\n"
-            "评分时请以如下格式输出最终结果：\n"
-            "最终得分：X分"
-        )
+        existing_criteria = self.criteria_text.get("1.0", "end").strip()
+
+        if existing_criteria:
+            prompt = (
+                "你是一个考试命题和评分标准制定专家。\n\n"
+                "请根据这张题目图片，制定详细的阅卷评分标准。\n\n"
+                f"## 参考：现有评分标准（请在此基础上改进、补充，保留合理的部分）\n{existing_criteria}\n\n"
+                "要求：\n"
+                "1. 明确指出各题/各小问的分值分布\n"
+                "2. 列出每个得分点和扣分标准\n"
+                "3. 评分标准要具体、可操作，方便AI对照评分\n"
+                "4. 严格按照以下格式输出（包括冒号和标题）：\n"
+                "\n"
+                "总分：<总分数>分\n"
+                "\n"
+                "评分细则：\n"
+                "<题号1> <分值>分。得分标准：<评分要点>\n"
+                "<题号2> <分值>分。扣分说明：<扣分标准>\n"
+                "\n"
+                "请直接输出优化后的完整评分标准，不要输出多余内容。"
+            )
+        else:
+            prompt = (
+                "你是一个考试命题和评分标准制定专家。\n\n"
+                "请根据这张题目图片，制定详细的阅卷评分标准。要求：\n"
+                "1. 明确指出各题/各小问的分值分布\n"
+                "2. 列出每个得分点和扣分标准\n"
+                "3. 评分标准要具体、可操作，方便AI对照评分\n"
+                "4. 严格按照以下格式输出（包括冒号和标题）：\n"
+                "\n"
+                "总分：<总分数>分\n"
+                "\n"
+                "评分细则：\n"
+                "<题号1> <分值>分。得分标准：<评分要点>\n"
+                "<题号2> <分值>分。扣分说明：<扣分标准>\n"
+                "\n"
+                "请直接输出评分标准，不要输出多余内容。"
+            )
 
         print(f"[生成评分标准] 正在调用 AI（{provider}/{model}）…")
 

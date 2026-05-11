@@ -57,11 +57,26 @@ class AutoScoringSystem:
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         self.on_score_callback = on_score_callback
 
+    @staticmethod
+    def _is_blank_image(image_path: str, threshold: float = 15.0) -> bool:
+        """检测图片是否接近空白（基于像素亮度标准差）。阈值 15 以下判定为空白。"""
+        from PIL import Image
+        import numpy as np
+        img = Image.open(image_path).convert("L")
+        pixels = np.array(img, dtype=np.float32)
+        return float(np.std(pixels)) < threshold
+
     def _process_one_question(self, question_index=None):
         image = self.screenshot_tool.capture_current_question()
         qid = question_index if question_index is not None else "single"
         filename = str(self.capture_dir / f"question_{qid}_{int(time.time())}.jpg")
         self.screenshot_tool.save_image(image, filename)
+
+        # 空白卷检测：跳过 AI 节省开销，直接给 0 分
+        if self._is_blank_image(filename):
+            print(f"[空白检测] 题目 {qid} 截图接近空白，直接判定 0 分，跳过 AI 评分")
+            self.filler.fill_score(0)
+            return
 
         score = self.scorer.grade_answer(filename, self.criteria)
         print(f"评分结果：{score}分")

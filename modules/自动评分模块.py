@@ -12,6 +12,16 @@ import time
 
 import requests
 
+# 系统级提示：强制 AI 在回复末尾输出标准格式的最终得分，提升自动提取准确率。
+# 由系统自动追加到每次评分请求中，用户无需手动维护。
+FINAL_SCORE_INSTRUCTION = (
+    "\n\n---\n"
+    "【重要】评分结束后，你必须在回复的最后一行，以如下精确格式输出最终得分（不要附加任何其他文字）：\n"
+    "最终得分：X分\n"
+    "其中 X 为整数，代表该份答卷的总得分。\n"
+    "【重要】空白卷处理：如果学生答卷为空白、无任何作答内容、仅有印刷题目或无法识别任何学生笔迹，你必须直接给出0分，且不得编写参考答案、示例答案或补全内容后评分。你只能依据学生实际写下的内容评分。"
+)
+
 
 def _is_responses_api_endpoint(base_url: str) -> bool:
     """检测是否为 Responses API 端点（火山引擎方舟等使用）"""
@@ -112,11 +122,20 @@ class BaseScorer:
         """提取分数，增强容错性"""
         text = text.strip()
 
+        # 预处理：去除 Markdown 粗体/斜体标记，防止 `得 **3分**` 中数字被 `*` 隔断
+        text = re.sub(r'\*+', '', text)
+
+        # 空白卷兜底：检测 AI 是否自行编写了参考答案（正常评分回复不应出现这些词）
+        reference_keywords = ["参考答案", "示例答案", "建议答案", "标准答案", "正确答案"]
+        if any(kw in text for kw in reference_keywords):
+            print("[输出拦截] AI 回复包含参考答案关键词，判定为空白卷，强制 0 分")
+            return 0
+
         # 优先级 0：明确的最终/总分表述（最高优先级，避免被中间小分干扰）
         summary_patterns = [
-            r"最终得分[^=]*=\s*.*?(\d+)\.?\d*\s*分",
+            r"最终得分[：:=\s]*(\d+)\.?\d*\s*分",
             r"总分\s*[：:]\s*(\d+)\.?\d*\s*分",
-            r"最终.*?得\s*(\d+)\.?\d*\s*分",
+            r"最终.*?得分?[：:=\s]*(\d+)\.?\d*\s*分",
             r"[预估预计][得评]分\s*[：:]\s*(\d+)\.?\d*\s*分",
             r"理论得分\s*[：:\s]*(\d+)\.?\d*\s*分",
             r"合计\s*[：:\s]*(\d+)\.?\d*\s*分",
@@ -211,6 +230,13 @@ class BaseScorer:
     def get_last_response(self):
         return self.last_ai_response
 
+    @staticmethod
+    def _prepare_criteria(criteria: str) -> str:
+        """自动将系统级格式要求追加到用户评分标准之后。"""
+        if "最终得分" in criteria:
+            return criteria
+        return criteria + FINAL_SCORE_INSTRUCTION
+
 
 class ZhipuAIScorer(BaseScorer):
     """智谱 AI 评分器"""
@@ -225,6 +251,7 @@ class ZhipuAIScorer(BaseScorer):
         self.client = zhipuai.ZhipuAI(api_key=api_key)
 
     def grade_answer(self, image_path, criteria):
+        criteria = self._prepare_criteria(criteria)
         with open(image_path, "rb") as image_file:
             image_data = image_file.read()
         base64_image = base64.b64encode(image_data).decode("utf-8")
@@ -274,6 +301,7 @@ class OpenAICompatibleScorer(BaseScorer):
             raise ValueError("api_key 不能为空")
 
     def grade_answer(self, image_path, criteria):
+        criteria = self._prepare_criteria(criteria)
         with open(image_path, "rb") as image_file:
             image_data = image_file.read()
         base64_image = base64.b64encode(image_data).decode("utf-8")
@@ -374,6 +402,7 @@ class BaiduScorer(BaseScorer):
         return resp.json()["access_token"]
 
     def grade_answer(self, image_path, criteria):
+        criteria = self._prepare_criteria(criteria)
         access_token = self._get_access_token()
         with open(image_path, "rb") as f:
             base64_image = base64.b64encode(f.read()).decode("utf-8")
@@ -422,6 +451,7 @@ class XunfeiScorer(BaseScorer):
         self._base_url = "https://spark-api.xf-yun.com/v4.0/chat"
 
     def grade_answer(self, image_path, criteria):
+        criteria = self._prepare_criteria(criteria)
         with open(image_path, "rb") as f:
             base64_image = base64.b64encode(f.read()).decode("utf-8")
 

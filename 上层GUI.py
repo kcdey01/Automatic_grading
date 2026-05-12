@@ -18,6 +18,8 @@ import threading
 import time
 from pathlib import Path
 
+from PIL import Image, ImageTk
+
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
 from modules.自动填分模块 import AutoFiller
@@ -70,6 +72,10 @@ class App(tk.Tk):
         self.tuner = RuleTuner()
         self._next_record_index = 0
         self._tuning_running = False
+        self._tune_preview_window: tk.Toplevel | None = None
+        self._tune_preview_image_ref = None
+        self._tune_preview_item = None
+        self._tune_preview_last_xy = (0, 0)
 
         self._build_menu()
         self._build_ui()
@@ -254,6 +260,8 @@ class App(tk.Tk):
         self.tune_tree.column("状态", width=80, anchor="center")
         self.tune_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.tune_tree.bind("<<TreeviewSelect>>", self._on_tune_tree_select)
+        self.tune_tree.bind("<Motion>", self._on_tune_tree_motion)
+        self.tune_tree.bind("<Leave>", self._hide_tune_preview)
 
         tune_btns = ttk.Frame(tune_top)
         tune_btns.pack(side=tk.RIGHT, padx=(8, 0))
@@ -1113,11 +1121,100 @@ class App(tk.Tk):
 
     # ── 规则调优方法 ──
 
-    def _tune_add_record(self, question_index, score, response_info):
-        """从评分回调线程接收记录（线程安全）"""
-        self.after(0, self._tune_add_record_ui, question_index, score, response_info)
+    def _get_tune_record_by_item(self, item_id):
+        try:
+            values = self.tune_tree.item(item_id).get("values", [])
+        except tk.TclError:
+            return None
+        if not values:
+            return None
+        try:
+            idx = int(values[0])
+        except (TypeError, ValueError):
+            return None
+        return next((r for r in self.tuner.records if r.index == idx), None)
 
-    def _tune_add_record_ui(self, question_index, score, response_info):
+    def _on_tune_tree_motion(self, event):
+        row_id = self.tune_tree.identify_row(event.y)
+        if not row_id:
+            self._hide_tune_preview()
+            return
+        record = self._get_tune_record_by_item(row_id)
+        if record is None:
+            self._hide_tune_preview()
+            return
+        self._tune_preview_last_xy = (event.x_root, event.y_root)
+        if row_id == self._tune_preview_item and self._tune_preview_window is not None:
+            self._position_tune_preview(event.x_root, event.y_root)
+            return
+        self._show_tune_preview(row_id, record, event.x_root, event.y_root)
+
+    def _position_tune_preview(self, x_root, y_root):
+        if self._tune_preview_window is None:
+            return
+        try:
+            self._tune_preview_window.geometry(f"+{x_root + 16}+{y_root + 16}")
+        except tk.TclError:
+            self._tune_preview_window = None
+
+    def _show_tune_preview(self, item_id, record, x_root, y_root):
+        self._hide_tune_preview()
+        win = tk.Toplevel(self)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        frame = ttk.Frame(win, padding=8, relief="solid", borderwidth=1)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        manual_score = "未标记" if record.manual_score is None else f"{record.manual_score}分"
+        info_lines = [
+            f"记录序号：{record.index}",
+            f"AI 分数：{record.ai_score}分",
+            f"正确分数：{manual_score}",
+            f"状态：{record.status}",
+        ]
+        for line in info_lines:
+            ttk.Label(frame, text=line).pack(anchor="w")
+
+        image_path = (record.image_path or "").strip()
+        if not image_path:
+            ttk.Label(frame, text="截图路径缺失").pack(anchor="w", pady=(6, 0))
+            self._tune_preview_image_ref = None
+        else:
+            path = Path(image_path)
+            ttk.Label(frame, text=f"截图：{path.name}").pack(anchor="w", pady=(6, 0))
+            if not path.exists():
+                ttk.Label(frame, text="截图文件不存在").pack(anchor="w")
+                self._tune_preview_image_ref = None
+            else:
+                try:
+                    with Image.open(path) as img:
+                        img.thumbnail((420, 320))
+                        photo = ImageTk.PhotoImage(img.copy())
+                    self._tune_preview_image_ref = photo
+                    ttk.Label(frame, image=photo).pack(anchor="w", pady=(4, 0))
+                except Exception as e:
+                    ttk.Label(frame, text=f"截图预览失败：{e}").pack(anchor="w")
+                    self._tune_preview_image_ref = None
+
+        self._tune_preview_window = win
+        self._tune_preview_item = item_id
+        self._position_tune_preview(x_root, y_root)
+
+    def _hide_tune_preview(self, event=None):
+        if self._tune_preview_window is not None:
+            try:
+                self._tune_preview_window.destroy()
+            except tk.TclError:
+                pass
+        self._tune_preview_window = None
+        self._tune_preview_image_ref = None
+        self._tune_preview_item = None
+
+    def _tune_add_record(self, question_index, score, response_info, image_path=""):
+        """从评分回调线程接收记录（线程安全）"""
+        self.after(0, self._tune_add_record_ui, question_index, score, response_info, image_path)
+
+    def _tune_add_record_ui(self, question_index, score, response_info, image_path=""):
         idx = self._next_record_index
         self._next_record_index += 1
         criteria = self.criteria_text.get("1.0", "end").strip()
@@ -1126,6 +1223,7 @@ class App(tk.Tk):
             ai_score=score,
             ai_response=response_info.get("full_response", ""),
             criteria=criteria,
+            image_path=image_path or "",
         )
         self.tuner.add_record(record)
         self.tune_tree.insert("", "end", values=(idx, score, "—", "待标记"))
@@ -1155,13 +1253,20 @@ class App(tk.Tk):
             return
 
         item = self.tune_tree.item(sel[0])
-        idx = item["values"][0]
+        try:
+            idx = int(item["values"][0])
+        except (TypeError, ValueError):
+            messagebox.showerror("错误", "记录序号无效")
+            return
         ok = self.tuner.set_manual_score(idx, manual)
         if not ok:
             return
         # 更新 treeview
         record = next(r for r in self.tuner.records if r.index == idx)
         self.tune_tree.item(sel[0], values=(idx, record.ai_score, manual, record.status))
+        if self._tune_preview_item == sel[0]:
+            x_root, y_root = self._tune_preview_last_xy
+            self._show_tune_preview(sel[0], record, x_root, y_root)
         self._tune_update_status()
 
     def _run_tuning(self):
@@ -1238,6 +1343,7 @@ class App(tk.Tk):
         print("[规则调优] 已应用优化后的评分标准")
 
     def _clear_tuning(self):
+        self._hide_tune_preview()
         self.tuner.records.clear()
         self.tuner.suggested_criteria = ""
         self._next_record_index = 0

@@ -105,7 +105,10 @@ class AutoScoringSystem:
             print(f"AI返回信息：{response_info['full_response']}")
         if self.on_score_callback and response_info:
             try:
-                self.on_score_callback(question_index, score, response_info)
+                try:
+                    self.on_score_callback(question_index, score, response_info, filename)
+                except TypeError:
+                    self.on_score_callback(question_index, score, response_info)
             except Exception as e:
                 print(f"[回调错误] {e}")
         self.filler.fill_score(score)

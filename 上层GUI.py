@@ -16,6 +16,7 @@ import requests
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from PIL import Image, ImageTk
@@ -24,6 +25,7 @@ from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
 from modules.自动填分模块 import AutoFiller
 from modules.规则调优模块 import RuleTuner, ScoringRecord
+from modules.评分数据库模块 import ScoringDatabase
 
 
 class _QueueStdout:
@@ -49,6 +51,9 @@ class App(tk.Tk):
         self.config_path = Path(__file__).with_name("config.json")
         self.capture_dir = Path(__file__).with_name("captures")
         self.capture_dir.mkdir(parents=True, exist_ok=True)
+        self.score_db = ScoringDatabase(Path(__file__).with_name("scores.db"))
+        self._score_session_id = uuid.uuid4().hex
+        self._record_db_ids: dict[int, int] = {}
 
         self._log_q: "queue.Queue[str]" = queue.Queue()
         self._orig_stdout = sys.stdout
@@ -92,6 +97,8 @@ class App(tk.Tk):
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="保存配置", command=self._save_config)
         file_menu.add_command(label="加载配置", command=lambda: self._load_config(silent=False))
+        file_menu.add_separator()
+        file_menu.add_command(label="导出评分记录为 CSV", command=self._export_scores_csv)
         file_menu.add_separator()
         file_menu.add_command(label="清空截图目录", command=self._clear_captures)
         menubar.add_cascade(label="文件", menu=file_menu)
@@ -951,6 +958,23 @@ class App(tk.Tk):
     def _clear_log(self):
         self.log_text.delete("1.0", "end")
 
+    def _export_scores_csv(self):
+        default_name = f"评分记录_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        path = filedialog.asksaveasfilename(
+            title="导出评分记录",
+            defaultextension=".csv",
+            initialfile=default_name,
+            filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            count = self.score_db.export_csv(path)
+            messagebox.showinfo("导出完成", f"已导出 {count} 条评分记录：\n{path}")
+            print(f"[评分数据库] 已导出 {count} 条记录：{path}")
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+
     def _clear_captures(self):
         if not messagebox.askyesno("确认", "确定要清空截图目录中的所有文件吗？"):
             return
@@ -1214,6 +1238,27 @@ class App(tk.Tk):
         """从评分回调线程接收记录（线程安全）"""
         self.after(0, self._tune_add_record_ui, question_index, score, response_info, image_path)
 
+    def _save_score_record(self, record, question_index):
+        mode = "batch" if self.batch_var.get() else "single"
+        question_value = "single" if question_index is None else str(question_index)
+        db_id = self.score_db.insert_record(
+            session_id=self._score_session_id,
+            record_index=record.index,
+            question_index=question_value,
+            mode=mode,
+            provider=self.provider_var.get(),
+            model=(self.model_var.get() or "").strip(),
+            base_url=(self.base_url_var.get() or "").strip(),
+            ai_score=record.ai_score,
+            manual_score=record.manual_score,
+            status=record.status,
+            criteria=record.criteria,
+            ai_response=record.ai_response,
+            image_path=record.image_path,
+        )
+        self._record_db_ids[record.index] = db_id
+        return db_id
+
     def _tune_add_record_ui(self, question_index, score, response_info, image_path=""):
         idx = self._next_record_index
         self._next_record_index += 1
@@ -1226,6 +1271,10 @@ class App(tk.Tk):
             image_path=image_path or "",
         )
         self.tuner.add_record(record)
+        try:
+            self._save_score_record(record, question_index)
+        except Exception as e:
+            print(f"[评分数据库] 写入失败：{e}")
         self.tune_tree.insert("", "end", values=(idx, score, "—", "待标记"))
         self._tune_update_status()
 
@@ -1264,6 +1313,12 @@ class App(tk.Tk):
         # 更新 treeview
         record = next(r for r in self.tuner.records if r.index == idx)
         self.tune_tree.item(sel[0], values=(idx, record.ai_score, manual, record.status))
+        db_id = self._record_db_ids.get(idx)
+        if db_id is not None:
+            try:
+                self.score_db.update_manual_score(db_id, manual, record.status)
+            except Exception as e:
+                print(f"[评分数据库] 更新人工分失败：{e}")
         if self._tune_preview_item == sel[0]:
             x_root, y_root = self._tune_preview_last_xy
             self._show_tune_preview(sel[0], record, x_root, y_root)
@@ -1356,7 +1411,15 @@ class App(tk.Tk):
 
     def _tune_update_status(self):
         stats = self.tuner.get_stats()
-        self.tune_status_var.set(f"共 {stats['total']} 条 | 已标记 {stats['marked']} 条 | 偏差 {stats['mismatches']} 条")
+        try:
+            db_stats = self.score_db.get_stats()
+            avg_score = db_stats["avg_ai_score"]
+            history = f" | 历史 {db_stats['total']} 条 | 平均AI {avg_score:.1f}分"
+        except Exception:
+            history = ""
+        self.tune_status_var.set(
+            f"本次 {stats['total']} 条 | 已标记 {stats['marked']} 条 | 偏差 {stats['mismatches']} 条{history}"
+        )
 
     # ── 快捷优化评分标准 ──
 

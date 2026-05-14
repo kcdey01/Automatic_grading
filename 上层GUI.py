@@ -121,6 +121,27 @@ class App(tk.Tk):
         gen_menu.add_command(label="从图片文件生成评分标准", command=self._generate_criteria_from_file)
         menubar.add_cascade(label="生成", menu=gen_menu)
 
+        # ── 关于 ──
+        about_menu = tk.Menu(menubar, tearoff=0)
+        about_menu.add_command(label="关于本项目", command=self._show_about)
+        menubar.add_cascade(label="关于", menu=about_menu)
+
+    def _show_about(self):
+        win = tk.Toplevel(self)
+        win.title("关于")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        ttk.Label(win, text="自动阅卷系统", font=("Microsoft YaHei UI", 14, "bold")).pack(padx=24, pady=(20, 8))
+        ttk.Label(win, text="项目地址：").pack(padx=24, anchor="w")
+        link = tk.Label(win, text="https://github.com/kcdey01/Automatic_grading",
+                        fg="#1a0dab", cursor="hand2", font=("Microsoft YaHei UI", 10, "underline"))
+        link.pack(padx=24, anchor="w")
+        link.bind("<Button-1>", lambda e: __import__("webbrowser").open("https://github.com/kcdey01/Automatic_grading"))
+        ttk.Label(win, text="欢迎 Star & Issue & PR").pack(padx=24, pady=(8, 20))
+        ttk.Button(win, text="确定", command=win.destroy).pack(pady=(0, 16))
+        win.transient(self)
+        win.grab_set()
+
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
 

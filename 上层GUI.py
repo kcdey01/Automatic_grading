@@ -648,6 +648,7 @@ class App(tk.Tk):
         self._update_region_status()
         self._update_ready_status()
         print("[配置] 截图区域已更新（尚未保存，点击 文件 → 保存配置 后写入 config.json）")
+        messagebox.showinfo("完成", "截图区域已选择。")
 
     def _on_position_selected(self, attr_name, pos):
         self._runtime_config[attr_name] = list(pos)
@@ -844,7 +845,6 @@ class App(tk.Tk):
             messagebox.showerror("配置不完整", str(e))
             return
         sys.screenshot_tool.select_region_interactive(self)
-        messagebox.showinfo("完成", "截图区域已选择。")
 
     def _test_screenshot(self):
         try:

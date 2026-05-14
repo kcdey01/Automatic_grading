@@ -1,10 +1,5 @@
-# 自动阅卷系统依赖
-# ── 核心依赖 ──
-Pillow>=10.0.0          # 图像处理（截图、压缩、格式转换、空白图片检测）
-pyautogui>=0.9.54       # 屏幕截图、鼠标/键盘自动化操作
-requests>=2.31.0        # HTTP 请求（调用各类 AI 评分 API）
-zhipuai>=2.1.0          # 智谱 AI SDK（使用智谱AI服务商时需要）
-
-# ── 可选依赖 ──
-# playwright>=1.40.0    # DOM 模式自动填分（pip install playwright && playwright install）
-# tkinter               # Python 标准库，通常已内置；Linux 需 sudo apt install python3-tk
+# Auto Grading System Dependencies
+Pillow>=10.0.0
+pyautogui>=0.9.54
+requests>=2.31.0
+zhipuai>=2.1.0

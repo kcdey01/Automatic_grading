@@ -106,6 +106,7 @@ class App(tk.Tk):
         # ── 配置 ──
         cfg_menu = tk.Menu(menubar, tearoff=0)
         cfg_menu.add_command(label="选择截图区域", command=self._select_region)
+        cfg_menu.add_command(label="多区域框选（填空题）", command=self._select_multi_regions)
         cfg_menu.add_command(label="测试截图", command=self._test_screenshot)
         cfg_menu.add_command(label="显示/刷新截图区域提示", command=self._show_region_overlay)
         cfg_menu.add_command(label="隐藏截图区域提示", command=self._hide_region_overlay)
@@ -240,20 +241,21 @@ class App(tk.Tk):
         self.total_entry.grid(row=0, column=2, sticky="w", padx=(6, 0))
 
         ttk.Label(mid, text="空白阈值").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.blank_threshold_percent_var = tk.DoubleVar(value=37.5)
+        self.blank_threshold_var = tk.DoubleVar(value=15.0)
         blank_scale = ttk.Scale(
             mid,
             from_=0,
-            to=100,
+            to=40,
             length=180,
-            variable=self.blank_threshold_percent_var,
+            variable=self.blank_threshold_var,
             command=self._on_blank_threshold_change,
         )
         blank_scale.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(4, 0))
-        self.blank_threshold_label_var = tk.StringVar(value="38% 空白敏感度")
+        self.blank_threshold_label_var = tk.StringVar(value="阈值 15")
         ttk.Label(mid, textvariable=self.blank_threshold_label_var).grid(row=1, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
         ttk.Label(mid, text="高=更容易判空白").grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(4, 0))
         ttk.Button(mid, text="测试空白检测", command=self._test_blank_detection).grid(row=1, column=4, sticky="w", padx=(8, 0), pady=(4, 0))
+        ttk.Button(mid, text="标记空白卷", command=self._mark_blank_paper).grid(row=1, column=5, sticky="w", padx=(4, 0), pady=(4, 0))
 
         self.ready_status_var = tk.StringVar(value="准备状态：未检查")
         ttk.Label(mid, textvariable=self.ready_status_var).grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
@@ -362,21 +364,19 @@ class App(tk.Tk):
 
     def _get_blank_threshold(self) -> float:
         try:
-            percent = max(0.0, min(100.0, float(self.blank_threshold_percent_var.get())))
+            return round(max(0.0, min(40.0, float(self.blank_threshold_var.get()))), 1)
         except (TypeError, ValueError, tk.TclError):
             return 15.0
-        return round(percent / 100.0 * 40.0, 1)
 
     def _set_blank_threshold(self, threshold: float):
-        percent = max(0.0, min(100.0, float(threshold) / 40.0 * 100.0))
-        self.blank_threshold_percent_var.set(percent)
+        self.blank_threshold_var.set(max(0.0, min(40.0, float(threshold))))
 
     def _sync_blank_threshold_label(self):
         try:
-            percent = round(max(0.0, min(100.0, float(self.blank_threshold_percent_var.get()))))
+            val = round(max(0.0, min(40.0, float(self.blank_threshold_var.get()))), 1)
         except (TypeError, ValueError, tk.TclError):
-            percent = 38
-        self.blank_threshold_label_var.set(f"{percent}% 空白敏感度")
+            val = 15.0
+        self.blank_threshold_label_var.set(f"阈值 {val}")
 
     def _on_blank_threshold_change(self, _value=None):
         self._sync_blank_threshold_label()
@@ -867,6 +867,14 @@ class App(tk.Tk):
             return
         sys.screenshot_tool.select_region_interactive(self)
 
+    def _select_multi_regions(self):
+        try:
+            sys = self._ensure_system()
+        except Exception as e:
+            messagebox.showerror("配置不完整", str(e))
+            return
+        sys.screenshot_tool.select_regions_interactive(self)
+
     def _test_screenshot(self):
         try:
             sys_ = self._ensure_system()
@@ -910,6 +918,31 @@ class App(tk.Tk):
             messagebox.showinfo("空白检测测试", msg)
         except Exception as e:
             messagebox.showerror("测试失败", str(e))
+
+    def _mark_blank_paper(self):
+        try:
+            sys_ = self._ensure_system()
+        except Exception as e:
+            messagebox.showerror("配置不完整", str(e))
+            return
+        try:
+            img = sys_.screenshot_tool.capture_current_question()
+            if img is None:
+                raise ValueError("没有拿到截图，请先选择截图区域或检查截图权限。")
+            path = self.capture_dir / f"__blank_mark_{int(time.time())}.png"
+            img.save(path)
+            from PIL import ImageStat
+            stat = ImageStat.Stat(img.convert("L"))
+            stddev = float(stat.stddev[0])
+            new_threshold = round(stddev + 2.0, 1)
+            new_threshold = max(0.0, min(40.0, new_threshold))
+            self._set_blank_threshold(new_threshold)
+            if self.system is not None:
+                self.system.blank_threshold = new_threshold
+            print(f"[标记空白卷] 灰度波动={stddev:.1f} 已设置阈值={new_threshold:.1f} 文件={path}")
+            messagebox.showinfo("标记空白卷", f"已识别空白卷灰度波动：{stddev:.1f}\n已自动设置空白阈值为：{new_threshold:.1f}\n\n后续灰度波动低于此值的截图将被判定为空白卷。")
+        except Exception as e:
+            messagebox.showerror("标记失败", str(e))
 
     def _select_score_input(self):
         try:
@@ -1220,6 +1253,21 @@ class App(tk.Tk):
         for line in info_lines:
             ttk.Label(frame, text=line).pack(anchor="w")
 
+        # 显示 AI 反馈信息
+        ai_resp = (record.ai_response or "").strip()
+        if ai_resp:
+            if "===反馈开始===" in ai_resp and "===反馈结束===" in ai_resp:
+                feedback = ai_resp.split("===反馈开始===")[1].split("===反馈结束===")[0].strip()
+            else:
+                feedback = ai_resp
+            if feedback:
+                ttk.Separator(frame, orient="horizontal").pack(fill=tk.X, pady=4)
+                ttk.Label(frame, text="AI 反馈：", font=("", 9, "bold")).pack(anchor="w")
+                fb_text = tk.Text(frame, height=4, wrap="word", font=("微软雅黑", 9))
+                fb_text.insert("1.0", feedback)
+                fb_text.configure(state="disabled")
+                fb_text.pack(fill=tk.X, pady=(2, 4))
+
         image_path = (record.image_path or "").strip()
         if not image_path:
             ttk.Label(frame, text="截图路径缺失").pack(anchor="w", pady=(6, 0))
@@ -1297,6 +1345,8 @@ class App(tk.Tk):
         except Exception as e:
             print(f"[评分数据库] 写入失败：{e}")
         self.tune_tree.insert("", "end", values=(idx, score, "—", "待标记"))
+        q_label = f"题目 {question_index}" if question_index is not None else "当前题目"
+        print(f"[规则调优] 记录 #{idx} 已添加 | {q_label} | AI分数：{score}分")
         self._tune_update_status()
 
     def _on_tune_tree_select(self, event):

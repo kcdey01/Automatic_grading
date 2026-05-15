@@ -12,14 +12,37 @@ import time
 
 import requests
 
-# 系统级提示：强制 AI 在回复末尾输出标准格式的最终得分，提升自动提取准确率。
+# 支持思考模式的模型列表（模型名关键词匹配）
+_THINKING_MODEL_KEYWORDS = ["mimo", "qwen3", "deepseek-r1", "qwq", "thinking"]
+
+
+def _supports_thinking(model_name: str) -> bool:
+    """判断模型是否支持思考模式"""
+    name_lower = model_name.lower()
+    return any(kw in name_lower for kw in _THINKING_MODEL_KEYWORDS)
+
+
+# 系统级提示：强制 AI 输出结构化结果，便于自动提取分数和调试。
 # 由系统自动追加到每次评分请求中，用户无需手动维护。
 FINAL_SCORE_INSTRUCTION = (
     "\n\n---\n"
-    "【重要】评分结束后，你必须在回复的最后一行，以如下精确格式输出最终得分（不要附加任何其他文字）：\n"
-    "最终得分：X分\n"
-    "其中 X 为整数，代表该份答卷的总得分。\n"
-    "【重要】空白卷处理：如果学生答卷为空白、无任何作答内容、仅有印刷题目或无法识别任何学生笔迹，你必须直接给出0分，且不得编写参考答案、示例答案或补全内容后评分。你只能依据学生实际写下的内容评分。"
+    "【重要】评分指令：\n"
+    "你必须严格按照以下格式输出，不要有任何例外：\n\n"
+    "第一行：最终得分：X分（X为整数，这是唯一的得分依据）\n"
+    "第二行：===反馈开始===\n"
+    "第三行起：你的评分分析、扣分原因等调试信息\n"
+    "最后一行：===反馈结束===\n\n"
+    "示例：\n"
+    "最终得分：4分\n"
+    "===反馈开始===\n"
+    "第1题得2分，第2题得1分，第3题得1分。\n"
+    "===反馈结束===\n\n"
+    "规则：\n"
+    "- 第一行必须是「最终得分：X分」，X为整数\n"
+    "- 禁止在第一行之前输出任何内容\n"
+    "- 反馈信息中禁止输出emoji表情符号\n"
+    "- 空白卷直接输出：最终得分：0分\n"
+    "- 你只能依据学生实际写下的内容评分，不得补充或编写答案后评分"
 )
 
 
@@ -91,7 +114,7 @@ def fetch_openai_compatible_models(
 
 def call_llm_text(
     base_url: str, api_key: str, model: str, prompt: str,
-    extra_headers: dict | None = None, timeout: int = 120,
+    extra_headers: dict | None = None, timeout: int = 30,
 ) -> str:
     """
     通用文本 LLM 调用，自动适配标准 OpenAI Chat Completions 和 Responses API（火山引擎）。
@@ -167,13 +190,32 @@ class BaseScorer:
         # 预处理：去除 Markdown 粗体/斜体标记，防止 `得 **3分**` 中数字被 `*` 隔断
         text = re.sub(r'\*+', '', text)
 
-        # 空白卷兜底：检测 AI 是否自行编写了参考答案（正常评分回复不应出现这些词）
-        reference_keywords = ["参考答案", "示例答案", "建议答案", "标准答案", "正确答案"]
-        if any(kw in text for kw in reference_keywords):
-            print("[输出拦截] AI 回复包含参考答案关键词，判定为空白卷，强制 0 分")
+        # 判断 AI 是否遵循了结构化格式（含分隔符标记）
+        has_structured_format = "===反馈开始===" in text
+
+        # 从第一行提取最终得分
+        first_line = text.split('\n')[0].strip()
+        first_line_patterns = [
+            r"最终得分[：:=\s]*(\d+)\.?\d*\s*分",
+            r"总分\s*[：:]\s*(\d+)\.?\d*\s*分",
+            r"[=\u2248]\s*.*?(\d+)\.?\d*\s*分",
+        ]
+        for pattern in first_line_patterns:
+            match = re.search(pattern, first_line, re.IGNORECASE)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    if 0 <= score <= 150:
+                        return int(score)
+                except (ValueError, IndexError):
+                    continue
+
+        # 如果有分隔符但第一行没提取到，不再回退全文（防止从反馈区误提分数）
+        if has_structured_format:
+            print("[分数提取] 检测到结构化格式但第一行未匹配到得分，跳过全文兜底")
             return 0
 
-        # 优先级 0：明确的最终/总分表述（最高优先级，避免被中间小分干扰）
+        # 以下为兜底逻辑：仅在 AI 未遵循结构化格式时生效（兼容旧格式）
         summary_patterns = [
             r"最终得分[：:=\s]*(\d+)\.?\d*\s*分",
             r"总分\s*[：:]\s*(\d+)\.?\d*\s*分",
@@ -182,7 +224,7 @@ class BaseScorer:
             r"理论得分\s*[：:\s]*(\d+)\.?\d*\s*分",
             r"合计\s*[：:\s]*(\d+)\.?\d*\s*分",
             r"阅卷[结果分数]*\s*[：:\s]*(\d+)\.?\d*\s*分",
-            r"[=\u2248]\s*.*?(\d+)\.?\d*\s*分",  # 匹配 = 7分 / ≈ 7分 等格式
+            r"[=\u2248]\s*.*?(\d+)\.?\d*\s*分",
         ]
         for pattern in summary_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
@@ -330,7 +372,7 @@ class OpenAICompatibleScorer(BaseScorer):
     兼容常见的 /v1/chat/completions 结构（含图文 messages）。
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, extra_headers=None, timeout=120):
+    def __init__(self, base_url: str, api_key: str, model: str, extra_headers=None, timeout=60):
         super().__init__(model=model)
         self.base_url = (base_url or "").strip().rstrip("/")
         self.api_key = (api_key or "").strip()
@@ -384,6 +426,9 @@ class OpenAICompatibleScorer(BaseScorer):
                     }
                 ],
             }
+            if _supports_thinking(self.model):
+                payload["thinking"] = {"type": "enabled"}
+                print(f"[思考模式] 已为模型 {self.model} 启用思考模式")
 
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
@@ -400,24 +445,24 @@ class OpenAICompatibleScorer(BaseScorer):
             print(f"[API超时] {self.base_url} / {self.model}：{e}")
             self.last_ai_response = {
                 "full_response": "",
-                "score": 0,
+                "score": None,
                 "model": self.model,
                 "timestamp": time.strftime("%H:%M:%S"),
                 "provider": "openai_compatible",
                 "error": "timeout",
             }
-            return 0
+            raise TimeoutError(f"API超时: {self.base_url} / {self.model}") from e
         except requests.RequestException as e:
             print(f"[API请求失败] {self.base_url} / {self.model}：{e}")
             self.last_ai_response = {
                 "full_response": "",
-                "score": 0,
+                "score": None,
                 "model": self.model,
                 "timestamp": time.strftime("%H:%M:%S"),
                 "provider": "openai_compatible",
                 "error": "request_exception",
             }
-            return 0
+            raise ConnectionError(f"API请求失败: {self.base_url} / {self.model}") from e
 
         if _is_responses_api_endpoint(self.base_url):
             # 解析 Responses API 返回格式
@@ -431,7 +476,16 @@ class OpenAICompatibleScorer(BaseScorer):
                     if result:
                         break
         else:
-            result = data["choices"][0]["message"].get("content", "")
+            message = data["choices"][0]["message"]
+            result = message.get("content", "") or ""
+            # 思考模型：如果 content 为空但有 reasoning_content，记录日志
+            if not result and message.get("reasoning_content"):
+                print("[思考模式] 模型返回了思考内容但无最终答案，尝试从思考内容提取")
+                result = message["reasoning_content"]
+            # 记录思考内容用于调试（不参与分数提取）
+            if message.get("reasoning_content"):
+                thinking_preview = message["reasoning_content"][:200]
+                print(f"[思考过程] {thinking_preview}...")
         score = self.extract_score(result)
 
         self.last_ai_response = {
@@ -486,7 +540,7 @@ class BaiduScorer(BaseScorer):
             ],
         }
 
-        resp = requests.post(url, json=payload, timeout=120)
+        resp = requests.post(url, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         # 百度千帆的响应 key 是 "result"
@@ -565,7 +619,7 @@ class XunfeiScorer(BaseScorer):
             "Authorization": authorization,
         }
 
-        resp = requests.post(self._base_url, json=payload, headers=headers, timeout=120)
+        resp = requests.post(self._base_url, json=payload, headers=headers, timeout=60)
         resp.raise_for_status()
         data = resp.json()
 

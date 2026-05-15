@@ -88,12 +88,7 @@ class AutoScoringSystem:
             self.filler.fill_score(0)
             return
 
-        try:
-            score = self.scorer.grade_answer(filename, self.criteria)
-        except Exception as e:
-            print(f"[评分失败] 题目 {qid} 评分超时或接口异常：{e}")
-            self.filler.fill_score(0)
-            return
+        score = self.scorer.grade_answer(filename, self.criteria)
 
         print(f"评分结果：{score}分")
         response_info = self.scorer.get_last_response()
@@ -102,7 +97,12 @@ class AutoScoringSystem:
                 print(f"当前题目评分：{score}分")
             else:
                 print(f"题目 {question_index} 评分：{score}分")
-            print(f"AI返回信息：{response_info['full_response']}")
+            full_text = response_info['full_response']
+            if "===反馈开始===" in full_text and "===反馈结束===" in full_text:
+                feedback = full_text.split("===反馈开始===")[1].split("===反馈结束===")[0].strip()
+                print(f"AI反馈信息：{feedback}")
+            else:
+                print(f"AI返回信息：{full_text}")
         if self.on_score_callback and response_info:
             try:
                 try:
@@ -118,7 +118,9 @@ class AutoScoringSystem:
         import traceback
 
         traceback.print_exc()
-        time.sleep(5)
+        if isinstance(error, (TimeoutError, ConnectionError)):
+            print("[停止] API 连接异常，阅卷已终止")
+            self.running = False
 
     def run(self):
         if not self.batch_mode:

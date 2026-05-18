@@ -18,6 +18,7 @@ captures/
 
 # 虚拟环境
 venv/
+build_env/
 
 # 待办
 todo

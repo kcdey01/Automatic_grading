@@ -18,14 +18,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
       - name: Build with PyInstaller
-        run: pyinstaller build.spec --noconfirm
+        run: |
+          python -m venv build_env
+          build_env\Scripts\pip install -r requirements.txt pyinstaller --quiet
+          build_env\Scripts\pyinstaller build.spec --noconfirm
 
       - name: Create zip archive
         run: |
@@ -46,14 +43,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
       - name: Build with PyInstaller
-        run: pyinstaller build.spec --noconfirm
+        run: |
+          python -m venv build_env
+          build_env/bin/pip install -r requirements.txt pyinstaller --quiet
+          build_env/bin/pyinstaller build.spec --noconfirm
 
       - name: Create zip archive
         run: |
@@ -74,14 +68,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
       - name: Build with PyInstaller
-        run: pyinstaller build.spec --noconfirm
+        run: |
+          python -m venv build_env
+          build_env/bin/pip install -r requirements.txt pyinstaller --quiet
+          build_env/bin/pyinstaller build.spec --noconfirm
 
       - name: Create zip archive
         run: |

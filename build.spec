@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import sys
+import glob as _glob
 from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
@@ -9,7 +10,7 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# 收集 PIL 的所有文件（二进制、数据、隐藏导入）
+# 收集 PIL 的所有文件
 pil_datas, pil_binaries, pil_hiddenimports = collect_all('PIL')
 datas += pil_datas
 binaries += pil_binaries
@@ -20,6 +21,20 @@ pa_datas, pa_binaries, pa_hiddenimports = collect_all('pyautogui')
 datas += pa_datas
 binaries += pa_binaries
 hiddenimports += pa_hiddenimports
+
+# 收集 tkinter 的 tcl/tk DLL（Anaconda 环境下 PyInstaller 可能漏掉）
+_dll_search_dirs = []
+for base in [sys.prefix, sys.base_prefix, os.path.dirname(sys.executable)]:
+    _dll_search_dirs.append(os.path.join(base, 'Library', 'bin'))
+    _dll_search_dirs.append(os.path.join(base, 'DLLs'))
+
+for _dir in _dll_search_dirs:
+    if not os.path.isdir(_dir):
+        continue
+    for _name in ['tcl86t.dll', 'tk86t.dll', 'tcl8*.dll', 'tk8*.dll']:
+        for _f in _glob.glob(os.path.join(_dir, _name)):
+            if os.path.isfile(_f):
+                binaries.append((_f, '.'))
 
 a = Analysis(
     ['上层GUI.py'],
@@ -32,6 +47,8 @@ a = Analysis(
     hiddenimports=[
         'pyautogui',
         'PIL',
+        'tkinter',
+        '_tkinter',
         'requests',
         'zhipuai',
         'modules',

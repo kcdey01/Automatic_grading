@@ -25,7 +25,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: pyinstaller build.spec
+        run: pyinstaller build.spec --noconfirm
 
       - name: Create zip archive
         run: |
@@ -53,7 +53,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: pyinstaller build.spec
+        run: pyinstaller build.spec --noconfirm
 
       - name: Create zip archive
         run: |
@@ -81,7 +81,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: pyinstaller build.spec
+        run: pyinstaller build.spec --noconfirm
 
       - name: Create zip archive
         run: |

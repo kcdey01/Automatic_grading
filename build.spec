@@ -22,19 +22,18 @@ datas += pa_datas
 binaries += pa_binaries
 hiddenimports += pa_hiddenimports
 
-# 收集 tkinter 的 tcl/tk DLL（Anaconda 环境下 PyInstaller 可能漏掉）
-_dll_search_dirs = []
-for base in [sys.prefix, sys.base_prefix, os.path.dirname(sys.executable)]:
-    _dll_search_dirs.append(os.path.join(base, 'Library', 'bin'))
-    _dll_search_dirs.append(os.path.join(base, 'DLLs'))
-
-for _dir in _dll_search_dirs:
-    if not os.path.isdir(_dir):
+# Anaconda 环境下 PyInstaller 无法自动发现 Library/bin 中的 DLL
+# 将 base_prefix/Library/bin 下所有 DLL 一并打包，避免逐个缺失
+_seen = set()
+for _base in [sys.prefix, sys.base_prefix]:
+    _lib_bin = os.path.join(_base, 'Library', 'bin')
+    if not os.path.isdir(_lib_bin):
         continue
-    for _name in ['tcl86t.dll', 'tk86t.dll', 'tcl8*.dll', 'tk8*.dll']:
-        for _f in _glob.glob(os.path.join(_dir, _name)):
-            if os.path.isfile(_f):
-                binaries.append((_f, '.'))
+    for _dll in _glob.glob(os.path.join(_lib_bin, '*.dll')):
+        _name = os.path.basename(_dll).lower()
+        if _name not in _seen:
+            _seen.add(_name)
+            binaries.append((_dll, '.'))
 
 a = Analysis(
     ['上层GUI.py'],
@@ -49,6 +48,8 @@ a = Analysis(
         'PIL',
         'tkinter',
         '_tkinter',
+        'ctypes',
+        '_ctypes',
         'requests',
         'zhipuai',
         'modules',

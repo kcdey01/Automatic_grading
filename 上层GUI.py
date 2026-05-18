@@ -7,6 +7,8 @@
 python 上层GUI.py
 """
 
+__version__ = "1.0.0"
+
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import json
@@ -133,6 +135,7 @@ class App(tk.Tk):
         win.resizable(False, False)
         win.attributes("-topmost", True)
         ttk.Label(win, text="自动阅卷系统", font=("Microsoft YaHei UI", 14, "bold")).pack(padx=24, pady=(20, 8))
+        ttk.Label(win, text=f"版本：{__version__}", font=("Microsoft YaHei UI", 10)).pack(padx=24, anchor="w")
         ttk.Label(win, text="项目地址：").pack(padx=24, anchor="w")
         link = tk.Label(win, text="https://github.com/kcdey01/Automatic_grading",
                         fg="#1a0dab", cursor="hand2", font=("Microsoft YaHei UI", 10, "underline"))
@@ -1599,10 +1602,14 @@ class App(tk.Tk):
             super().destroy()
 
 
-if __name__ == "__main__":
+def main():
     app = App()
     try:
         app.mainloop()
     finally:
         time.sleep(0.05)
+
+
+if __name__ == "__main__":
+    main()
 

@@ -4,6 +4,7 @@ config.json
 # Python 缓存
 __pycache__/
 *.pyc
+*.pyo
 
 # 评分数据库（含评分标准、AI 响应和截图路径）
 scores.db
@@ -17,11 +18,17 @@ captures/
 
 # 虚拟环境
 venv/
-__pycache__/自动阅卷系统GUI.cpython-314.pyc
+
+# 待办
 todo
-__pycache__/自动阅卷系统GUI.cpython-314.pyc
-modules/__pycache__/__init__.cpython-314.pyc
-__pycache__/自动阅卷系统GUI.cpython-314.pyc
-modules/__pycache__/自动截图模块.cpython-314.pyc
-modules/__pycache__/自动评分模块.cpython-314.pyc
-modules/__pycache__/自动填分模块.cpython-314.pyc
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec.bak
+*.exe
+*.app
+
+# 操作系统文件
+.DS_Store
+Thumbs.db

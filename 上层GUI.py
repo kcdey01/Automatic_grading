@@ -579,7 +579,7 @@ class App(tk.Tk):
         "硅基流动":     ("https://api.siliconflow.cn/v1",                   "Qwen/Qwen2-VL-72B-Instruct"),
         "百度千帆":     ("https://qianfan.baidubce.com",                    "ernie-4.0-8k"),
         "科大讯飞":     ("",                                                "spark-v4.0"),
-        "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5-pro"),
+        "小米MiMo":     ("https://api.xiaomimimo.com/v1",             "mimo-v2.5-pro"),
         "自定义":       ("",                                                ""),
     }
 

@@ -586,7 +586,8 @@ class App(tk.Tk):
         preset = self.PROVIDER_PRESETS.get(provider)
         if preset:
             preset_url, preset_model = preset
-            self.base_url_var.set(preset_url)
+            if provider != "自定义":
+                self.base_url_var.set(preset_url)
             if self.model_var.get().strip() in {"gpt-4o", "gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", "mimo-v2.5-pro", "doubao-seed-1-8-251228", ""}:
                 self.model_var.set(preset_model)
 
@@ -610,7 +611,6 @@ class App(tk.Tk):
         elif provider == "自定义":
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="normal")
-            self.base_url_var.set("")
         else:
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="normal")

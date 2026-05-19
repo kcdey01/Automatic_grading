@@ -206,6 +206,8 @@ class App(tk.Tk):
         self.model_combo.grid(row=1, column=1, sticky="w", padx=(6, 0))
         self.fetch_models_btn = ttk.Button(top, text="获取模型列表", command=self._fetch_models)
         self.fetch_models_btn.grid(row=1, column=2, sticky="w", padx=(12, 0))
+        self.open_platform_btn = ttk.Button(top, text="打开平台", command=self._open_provider_platform)
+        self.open_platform_btn.grid(row=1, column=3, sticky="w", padx=(6, 0))
 
         ttk.Label(top, text="base_url(OpenAI兼容)").grid(row=2, column=0, sticky="w")
         self.base_url_var = tk.StringVar(value="https://api.openai.com")
@@ -580,6 +582,27 @@ class App(tk.Tk):
         "小米MiMo":     ("https://token-plan-cn.xiaomimimo.com/v1",          "mimo-v2.5-pro"),
         "自定义":       ("",                                                ""),
     }
+
+    PROVIDER_PLATFORMS = {
+        "OpenAI":       "https://platform.openai.com",
+        "智谱AI":       "https://www.bigmodel.cn/glm-coding?ic=JCASAUKSRL",
+        "阿里通义千问": "https://www.aliyun.com/minisite/goods?userCode=f9ablkb2",
+        "字节豆包":     "https://console.volcengine.com/ark",
+        "零一万物":     "https://platform.lingyiwanwu.com",
+        "硅基流动":     "https://cloud.siliconflow.cn/i/3w6SanhF",
+        "百度千帆":     "https://qianfan.cloud.baidu.com",
+        "科大讯飞":     "https://console.xfyun.cn",
+        "小米MiMo":     "https://platform.xiaomimimo.com?ref=6LYNWJ",
+    }
+
+    def _open_provider_platform(self):
+        provider = self.provider_var.get()
+        url = self.PROVIDER_PLATFORMS.get(provider)
+        if not url:
+            messagebox.showinfo("提示", f"「{provider}」没有对应的平台地址，请手动打开。")
+            return
+        import webbrowser
+        webbrowser.open(url)
 
     def _sync_provider_state(self):
         provider = self.provider_var.get()

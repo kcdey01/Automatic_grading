@@ -276,6 +276,18 @@ class App(tk.Tk):
         self.progress_var = tk.StringVar(value="未开始")
         ttk.Label(runbox, textvariable=self.progress_var).grid(row=0, column=3, padx=12, pady=8, sticky="w")
 
+        ttk.Label(runbox, text="输入框全选方式").grid(row=1, column=0, padx=8, sticky="w")
+        self.select_all_method_var = tk.StringVar(value="三击选中（推荐）")
+        _select_all_combo = ttk.Combobox(
+            runbox,
+            textvariable=self.select_all_method_var,
+            width=18,
+            values=["三击选中（推荐）", "Home+Shift+End", "Ctrl+A（兼容模式）"],
+            state="readonly",
+        )
+        _select_all_combo.grid(row=1, column=1, columnspan=2, padx=8, sticky="w")
+        ttk.Label(runbox, text="避免评分网站快捷键冲突").grid(row=1, column=3, padx=4, sticky="w")
+
         # ── 规则调优 ──
         tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
         tune_frame.pack(fill=tk.BOTH, expand=False, **pad)
@@ -366,6 +378,17 @@ class App(tk.Tk):
         if hasattr(self, "start_btn"):
             text = "开始批量阅卷" if self.batch_var.get() else "开始单题阅卷"
             self.start_btn.configure(text=text)
+
+    _SELECT_ALL_LABEL_MAP = {
+        "三击选中（推荐）": "triple_click",
+        "Home+Shift+End": "home_shift_end",
+        "Ctrl+A（兼容模式）": "ctrl_a",
+    }
+    _SELECT_ALL_LABEL_REVERSE = {v: k for k, v in _SELECT_ALL_LABEL_MAP.items()}
+
+    def _get_select_all_method(self) -> str:
+        label = self.select_all_method_var.get()
+        return self._SELECT_ALL_LABEL_MAP.get(label, "triple_click")
 
     def _get_blank_threshold(self) -> float:
         try:
@@ -650,6 +673,7 @@ class App(tk.Tk):
             "total_questions": self.total_var.get(),
             "blank_threshold": self._get_blank_threshold(),
             "filler_mode": "pyautogui",
+            "select_all_method": self._get_select_all_method(),
         }
         cfg.update(self._collect_runtime_config())
         return cfg
@@ -687,6 +711,7 @@ class App(tk.Tk):
             pos = self._normalize_number_list(self._runtime_config.get(key), 2, as_int=True)
             if pos:
                 setattr(self.system.filler, key, tuple(pos))
+        self.system.filler.select_all_method = self._get_select_all_method()
         self._update_region_status()
         self._update_ready_status()
 
@@ -753,6 +778,12 @@ class App(tk.Tk):
 
         if "filler_mode" in cfg:
             pass
+
+        if "select_all_method" in cfg:
+            method = str(cfg["select_all_method"])
+            label = self._SELECT_ALL_LABEL_REVERSE.get(method)
+            if label:
+                self.select_all_method_var.set(label)
 
         for key in ("screenshot_region_norm", "score_input_pos", "submit_btn_pos", "next_btn_pos"):
             if key in cfg:

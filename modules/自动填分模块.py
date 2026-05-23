@@ -15,6 +15,10 @@ import pyautogui
 class AutoFiller:
     """自动填分工具类"""
 
+    SELECT_ALL_TRIPLE_CLICK = "triple_click"
+    SELECT_ALL_HOME_SHIFT_END = "home_shift_end"
+    SELECT_ALL_CTRL_A = "ctrl_a"
+
     def __init__(self, root, mode="pyautogui", config=None, on_position_selected=None):
         self.root = root
         self.mode = mode or "pyautogui"
@@ -23,6 +27,7 @@ class AutoFiller:
         self.score_input_pos = None
         self.submit_btn_pos = None
         self.next_btn_pos = None
+        self.select_all_method = self.SELECT_ALL_TRIPLE_CLICK
         self._context = None
         self._browser = None
         self._playwright = None
@@ -216,6 +221,22 @@ class AutoFiller:
         print(f"[DOM] 已识别 {field_name} 选择器: {selector}")
         return selector
 
+    def _select_all_and_clear(self):
+        """选中输入框全部文本并删除，根据 select_all_method 选择方式。"""
+        method = self.select_all_method
+        if method == self.SELECT_ALL_CTRL_A:
+            pyautogui.hotkey("ctrl", "a")
+            pyautogui.press("backspace")
+        elif method == self.SELECT_ALL_HOME_SHIFT_END:
+            pyautogui.press("home")
+            pyautogui.hotkey("shift", "end")
+            pyautogui.press("backspace")
+        else:
+            # 默认：三击选中全部文本，然后删除
+            pyautogui.tripleClick(self.score_input_pos)
+            time.sleep(0.05)
+            pyautogui.press("backspace")
+
     def fill_score(self, score):
         if self.mode == "dom":
             try:
@@ -229,9 +250,7 @@ class AutoFiller:
             if self.score_input_pos:
                 pyautogui.click(self.score_input_pos)
                 time.sleep(0.12)
-                # 先清空原值，避免和已有分数拼接
-                pyautogui.hotkey("ctrl", "a")
-                pyautogui.press("backspace")
+                self._select_all_and_clear()
                 pyautogui.typewrite(str(score))
                 time.sleep(0.08)
                 pyautogui.press("tab")

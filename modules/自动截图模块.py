@@ -6,9 +6,39 @@
 """
 
 import tkinter as tk
+import sys
 
 import pyautogui
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
+
+
+def get_virtual_screen_geometry():
+    """返回虚拟桌面边界，支持副屏位于主屏左侧/上方的负坐标。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            left = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+            top = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+            width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+            height = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+            if width > 0 and height > 0:
+                return left, top, width, height
+        except Exception:
+            pass
+
+    try:
+        full = ImageGrab.grab(all_screens=True)
+        return 0, 0, full.width, full.height
+    except Exception:
+        width, height = pyautogui.size()
+        return 0, 0, width, height
+
+
+def format_tk_geometry(width: int, height: int, x: int, y: int) -> str:
+    """生成 Tk geometry 字符串，正确处理负坐标显示器。"""
+    return f"{width}x{height}{x:+d}{y:+d}"
 
 
 class ScreenshotTool:
@@ -36,12 +66,24 @@ class ScreenshotTool:
             if self.after_capture:
                 self.after_capture()
 
+    def _configure_selection_window(self, selection_window, screen_shot):
+        left, top, width, height = get_virtual_screen_geometry()
+        img_w, img_h = screen_shot.size
+
+        # ImageGrab(all_screens=True) 的尺寸是裁剪依据；Windows 虚拟桌面坐标用于把窗口铺到所有屏幕。
+        if width <= 0 or height <= 0:
+            width, height = img_w, img_h
+
+        selection_window.overrideredirect(True)
+        selection_window.attributes("-topmost", True)
+        selection_window.geometry(format_tk_geometry(width, height, left, top))
+        selection_window.update_idletasks()
+        return width, height, img_w, img_h
+
     def select_region_interactive(self, root):
         """交互式选择截图区域"""
         self.selected_regions_norm = []  # 清除多区域选区
         selection_window = tk.Toplevel(root)
-        selection_window.attributes("-fullscreen", True)
-        selection_window.attributes("-topmost", True)
         selection_window.title("拖拽框选截图区域（Esc 取消）")
 
         canvas = tk.Canvas(selection_window, bg="black", highlightthickness=0)
@@ -53,9 +95,9 @@ class ScreenshotTool:
             screen_shot = ImageGrab.grab(all_screens=True)
         except Exception:
             screen_shot = pyautogui.screenshot()
-        img_w, img_h = screen_shot.size
+        window_w, window_h, img_w, img_h = self._configure_selection_window(selection_window, screen_shot)
         if self.debug_print:
-            print(f"全屏截图尺寸: {img_w}x{img_h}")
+            print(f"全屏截图尺寸: {img_w}x{img_h}，选择窗口尺寸: {window_w}x{window_h}")
         screen_image = ImageTk.PhotoImage(screen_shot)
         self.screen_image_ref = screen_image
         canvas.create_image(0, 0, anchor=tk.NW, image=screen_image)
@@ -124,8 +166,6 @@ class ScreenshotTool:
         self.selected_region_norm = None  # 清除单区域选区
         self.selected_regions_norm = []
         selection_window = tk.Toplevel(root)
-        selection_window.attributes("-fullscreen", True)
-        selection_window.attributes("-topmost", True)
         selection_window.title("拖拽框选多个答案区域（Enter确认 | Backspace撤销 | Esc取消）")
 
         canvas = tk.Canvas(selection_window, bg="black", highlightthickness=0)
@@ -135,7 +175,7 @@ class ScreenshotTool:
             screen_shot = ImageGrab.grab(all_screens=True)
         except Exception:
             screen_shot = pyautogui.screenshot()
-        img_w, img_h = screen_shot.size
+        window_w, window_h, img_w, img_h = self._configure_selection_window(selection_window, screen_shot)
         screen_image = ImageTk.PhotoImage(screen_shot)
         self.screen_image_ref = screen_image
         canvas.create_image(0, 0, anchor=tk.NW, image=screen_image)
@@ -146,7 +186,7 @@ class ScreenshotTool:
         region_colors = ["#FF4444", "#44FF44", "#4444FF", "#FFFF44", "#FF44FF", "#44FFFF"]
 
         hint_id = canvas.create_text(
-            img_w // 2, 30,
+            window_w // 2, 30,
             text="拖拽框选答案区域 | Enter确认 | Backspace撤销 | Esc取消",
             fill="white", font=("微软雅黑", 16, "bold"),
         )

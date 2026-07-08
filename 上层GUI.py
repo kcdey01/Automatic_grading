@@ -24,6 +24,7 @@ from pathlib import Path
 from PIL import Image, ImageTk
 
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
+from modules.自动截图模块 import format_tk_geometry, get_virtual_screen_geometry
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
 from modules.自动填分模块 import AutoFiller
 from modules.规则调优模块 import RuleTuner, ScoringRecord
@@ -451,21 +452,18 @@ class App(tk.Tk):
         if not vals:
             return None
 
-        try:
-            from PIL import ImageGrab
-            full = ImageGrab.grab(all_screens=True)
-            screen_w, screen_h = full.size
-        except Exception:
-            import pyautogui
-            screen_w, screen_h = pyautogui.size()
+        virtual_x, virtual_y, screen_w, screen_h = get_virtual_screen_geometry()
 
         left, top, right, bottom = vals
-        x = int(max(0, min(screen_w - 1, left * screen_w)))
-        y = int(max(0, min(screen_h - 1, top * screen_h)))
-        width = int(max(1, min(screen_w, right * screen_w) - x))
-        height = int(max(1, min(screen_h, bottom * screen_h) - y))
+        rel_x = int(max(0, min(screen_w - 1, left * screen_w)))
+        rel_y = int(max(0, min(screen_h - 1, top * screen_h)))
+        rel_right = int(max(1, min(screen_w, right * screen_w)))
+        rel_bottom = int(max(1, min(screen_h, bottom * screen_h)))
+        x = virtual_x + rel_x
+        y = virtual_y + rel_y
+        width = int(max(1, rel_right - rel_x))
+        height = int(max(1, rel_bottom - rel_y))
         return x, y, width, height
-
     def _make_overlay_click_through(self, window):
         if os.name != "nt":
             return
@@ -504,7 +502,7 @@ class App(tk.Tk):
             self._region_overlay_canvas.pack(fill=tk.BOTH, expand=True)
             self._make_overlay_click_through(self._region_overlay)
 
-        self._region_overlay.geometry(f"{width}x{height}+{x}+{y}")
+        self._region_overlay.geometry(format_tk_geometry(width, height, x, y))
         self._region_overlay.deiconify()
         self._region_overlay.lift()
         self._region_overlay_visible = True

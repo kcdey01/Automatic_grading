@@ -9,11 +9,15 @@ import base64
 import json
 import re
 import time
+from typing import Mapping
 
 import requests
 
 # 支持思考模式的模型列表（模型名关键词匹配）
 _THINKING_MODEL_KEYWORDS = ["mimo", "qwen3", "deepseek-r1", "qwq", "thinking"]
+
+_API_MAX_ATTEMPTS = 3
+_API_RETRY_BACKOFF_SECONDS = 1.0
 
 
 def _supports_thinking(model_name: str) -> bool:
@@ -58,7 +62,11 @@ def _is_mimo_endpoint(base_url: str) -> bool:
     return "xiaomimimo.com" in base_url
 
 
-def _build_auth_headers(api_key: str, base_url: str = "", extra_headers: dict | None = None) -> dict:
+def _build_auth_headers(
+    api_key: str,
+    base_url: str = "",
+    extra_headers: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """
     根据平台构建认证头。
     小米 MiMo 使用 api-key 头，其他平台使用标准 Bearer token。
@@ -72,10 +80,26 @@ def _build_auth_headers(api_key: str, base_url: str = "", extra_headers: dict | 
     return headers
 
 
+def _request_with_retries(method: str, url: str, **kwargs) -> requests.Response:
+    """对 API 超时和临时网络错误进行有限重试。"""
+    last_error = None
+    for attempt in range(1, _API_MAX_ATTEMPTS + 1):
+        try:
+            return requests.request(method, url, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            if attempt >= _API_MAX_ATTEMPTS:
+                break
+            wait_seconds = _API_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            print(f"[API重试] 第 {attempt} 次请求失败：{e}，{wait_seconds:.1f} 秒后重试")
+            time.sleep(wait_seconds)
+    raise last_error
+
+
 def fetch_openai_compatible_models(
     base_url: str,
     api_key: str,
-    extra_headers: dict | None = None,
+    extra_headers: Mapping[str, str] | None = None,
     timeout: int = 30,
 ) -> list[str]:
     """从 OpenAI 兼容接口读取 /models，返回模型 id 列表。"""
@@ -91,7 +115,7 @@ def fetch_openai_compatible_models(
     else:
         url = f"{base_url}/v1/models"
 
-    resp = requests.get(url, headers=headers, timeout=timeout)
+    resp = _request_with_retries("GET", url, headers=headers, timeout=timeout)
     if not resp.ok:
         try:
             detail = resp.json()
@@ -138,7 +162,7 @@ def call_llm_text(
                 }
             ],
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp = _request_with_retries("POST", url, headers=headers, json=payload, timeout=timeout)
         if not resp.ok:
             try:
                 detail = resp.json()
@@ -165,7 +189,7 @@ def call_llm_text(
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp = _request_with_retries("POST", url, headers=headers, json=payload, timeout=timeout)
         if not resp.ok:
             try:
                 detail = resp.json()
@@ -433,7 +457,7 @@ class OpenAICompatibleScorer(BaseScorer):
                 print(f"[思考模式] 已为模型 {self.model} 启用思考模式")
 
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+            resp = _request_with_retries("POST", url, headers=headers, json=payload, timeout=self.timeout)
             if not resp.ok:
                 try:
                     detail = resp.json()
@@ -510,7 +534,8 @@ class BaiduScorer(BaseScorer):
         self.client_secret = parts[1].strip() if len(parts) > 1 else ""
 
     def _get_access_token(self) -> str:
-        resp = requests.post(
+        resp = _request_with_retries(
+            "POST",
             "https://aip.baidubce.com/oauth/2.0/token",
             params={
                 "grant_type": "client_credentials",
@@ -542,7 +567,7 @@ class BaiduScorer(BaseScorer):
             ],
         }
 
-        resp = requests.post(url, json=payload, timeout=60)
+        resp = _request_with_retries("POST", url, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         # 百度千帆的响应 key 是 "result"
@@ -621,7 +646,7 @@ class XunfeiScorer(BaseScorer):
             "Authorization": authorization,
         }
 
-        resp = requests.post(self._base_url, json=payload, headers=headers, timeout=60)
+        resp = _request_with_retries("POST", self._base_url, json=payload, headers=headers, timeout=60)
         resp.raise_for_status()
         data = resp.json()
 

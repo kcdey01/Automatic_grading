@@ -41,11 +41,31 @@ class AutoFiller:
     def _review_score_check_enabled(self):
         return bool(self.config.get("review_score_check_enabled", True))
 
+    def _batch_mode_enabled(self):
+        return bool(self.config.get("batch_mode", False))
+
     def _readback_delay_seconds(self):
         try:
             return max(0.0, float(self.config.get("score_readback_delay_seconds", 0.25)))
         except (TypeError, ValueError):
             return 0.25
+
+    def _click_next_dom(self, page, next_selector, action_delay_ms):
+        if not next_selector:
+            print("[回评/二评校验] 批量模式未配置下一题选择器，已暂停批量阅卷")
+            raise ScoreMismatchError("回评/二评校验批量模式缺少下一题选择器")
+        page.wait_for_timeout(action_delay_ms)
+        page.wait_for_selector(next_selector, timeout=8000)
+        page.click(next_selector)
+        print("[回评/二评校验] 批量模式已点击下一题，未点击提交")
+
+    def _click_next_pyautogui(self):
+        if not self.next_btn_pos:
+            print("[回评/二评校验] 批量模式未设置下一题按钮，已暂停批量阅卷")
+            raise ScoreMismatchError("回评/二评校验批量模式缺少下一题按钮")
+        time.sleep(0.6)
+        pyautogui.click(self.next_btn_pos)
+        print("[回评/二评校验] 批量模式已点击下一题，未点击提交")
 
     def _normalize_score_value(self, value):
         text = str(value).strip().replace("，", ".").replace("。", ".")
@@ -232,7 +252,10 @@ class AutoFiller:
             actual_score = page.eval_on_selector(score_selector, "el => el.value ?? el.textContent ?? ''")
             self._ensure_score_matches(score, actual_score)
             page.fill(score_selector, str(score))
-            print("[回评/二评校验] 已填分，跳过提交和下一题点击")
+            if self._batch_mode_enabled():
+                self._click_next_dom(page, next_selector, action_delay_ms)
+            else:
+                print("[回评/二评校验] 已填分，跳过提交和下一题点击")
             return
         page.fill(score_selector, str(score))
         page.wait_for_selector(submit_selector, timeout=8000)
@@ -351,7 +374,10 @@ class AutoFiller:
                     time.sleep(0.05)
                     self._select_all_and_clear()
                     pyautogui.typewrite(str(score))
-                    print("[回评/二评校验] 已填分，跳过提交和下一题点击")
+                    if self._batch_mode_enabled():
+                        self._click_next_pyautogui()
+                    else:
+                        print("[回评/二评校验] 已填分，跳过提交和下一题点击")
                     return
                 self._select_all_and_clear()
                 pyautogui.typewrite(str(score))

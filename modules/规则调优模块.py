@@ -17,13 +17,14 @@ from modules.自动评分模块 import call_llm_text
 class ScoringRecord:
     """单次评分记录"""
 
-    def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None):
+    def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None, error_reason=""):
         self.index = index
         self.ai_score = ai_score
         self.ai_response = ai_response
         self.criteria = criteria
         self.image_path = image_path
         self.manual_score = manual_score
+        self.error_reason = error_reason
 
     @property
     def status(self):
@@ -53,10 +54,11 @@ class RuleTuner:
     def add_record(self, record: ScoringRecord):
         self.records.append(record)
 
-    def set_manual_score(self, index, manual_score) -> bool:
+    def set_manual_score(self, index, manual_score, error_reason="") -> bool:
         for r in self.records:
             if r.index == index:
                 r.manual_score = manual_score
+                r.error_reason = error_reason if manual_score != r.ai_score else ""
                 return True
         return False
 
@@ -90,6 +92,7 @@ class RuleTuner:
                 f"示例 {i}（偏差）:\n"
                 f"- AI 评分: {r.ai_score}分\n"
                 f"- 正确分数: {r.manual_score}分\n"
+                f"- 人工标注错误原因: {r.error_reason or '未填写'}\n"
                 f"- AI 评分思考过程: {r.ai_response}\n"
                 "---"
             )

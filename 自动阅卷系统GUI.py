@@ -86,6 +86,7 @@ class AutoScoringSystem:
         # 空白卷检测：跳过 AI 节省开销，直接给 0 分
         if self._is_blank_image(filename, threshold=self.blank_threshold):
             print(f"[空白检测] 题目 {qid} 截图接近空白（阈值 {self.blank_threshold:.1f}），直接判定 0 分，跳过 AI 评分")
+            self.filler.config["batch_mode"] = self.batch_mode
             self.filler.fill_score(0)
             return
 
@@ -112,6 +113,7 @@ class AutoScoringSystem:
                     self.on_score_callback(question_index, score, response_info)
             except Exception as e:
                 print(f"[回调错误] {e}")
+        self.filler.config["batch_mode"] = self.batch_mode
         self.filler.fill_score(score)
 
     def _handle_run_exception(self, error):

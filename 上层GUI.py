@@ -7,7 +7,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -317,7 +317,7 @@ class App(tk.Tk):
             variable=self.review_score_check_var,
             command=self._sync_filler_state,
         ).grid(row=2, column=0, padx=8, pady=(4, 8), sticky="w")
-        ttk.Label(runbox, text="只填分并校验，不点击提交/下一题").grid(row=2, column=1, columnspan=3, padx=8, pady=(4, 8), sticky="w")
+        ttk.Label(runbox, text="单题不提交/下一题；批量只点下一题不提交").grid(row=2, column=1, columnspan=3, padx=8, pady=(4, 8), sticky="w")
 
         # ── 规则调优 ──
         tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
@@ -328,13 +328,14 @@ class App(tk.Tk):
 
         tree_frame = ttk.Frame(tune_top)
         tree_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        columns = ("序号", "AI分数", "正确分数", "状态")
+        columns = ("序号", "AI分数", "正确分数", "错误原因", "状态")
         self.tune_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=4)
         for col in columns:
             self.tune_tree.heading(col, text=col)
         self.tune_tree.column("序号", width=50, anchor="center")
         self.tune_tree.column("AI分数", width=70, anchor="center")
         self.tune_tree.column("正确分数", width=70, anchor="center")
+        self.tune_tree.column("错误原因", width=160, anchor="w")
         self.tune_tree.column("状态", width=80, anchor="center")
         self.tune_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.tune_tree.bind("<<TreeviewSelect>>", self._on_tune_tree_select)
@@ -346,6 +347,9 @@ class App(tk.Tk):
         ttk.Label(tune_btns, text="正确分数:").pack(anchor="w")
         self.tune_manual_var = tk.StringVar()
         ttk.Entry(tune_btns, textvariable=self.tune_manual_var, width=8).pack(anchor="w", pady=2)
+        ttk.Label(tune_btns, text="错误原因:").pack(anchor="w", pady=(4, 0))
+        self.tune_reason_var = tk.StringVar()
+        ttk.Entry(tune_btns, textvariable=self.tune_reason_var, width=18).pack(anchor="w", pady=2)
         ttk.Button(tune_btns, text="标记", width=10, command=self._tune_mark_score).pack(anchor="w", pady=1)
 
         tune_bar = ttk.Frame(tune_frame)
@@ -559,6 +563,7 @@ class App(tk.Tk):
             return
         self.system.filler.select_all_method = self._get_select_all_method()
         self.system.filler.config["review_score_check_enabled"] = bool(self.review_score_check_var.get())
+        self.system.filler.config["batch_mode"] = bool(self.batch_var.get())
 
     def _fetch_models(self):
         provider = self.provider_var.get()
@@ -749,6 +754,7 @@ class App(tk.Tk):
                 setattr(self.system.filler, key, tuple(pos))
         self.system.filler.select_all_method = self._get_select_all_method()
         self.system.filler.config["review_score_check_enabled"] = bool(self.review_score_check_var.get())
+        self.system.filler.config["batch_mode"] = bool(self.batch_var.get())
         self._update_region_status()
         self._update_ready_status()
 
@@ -940,6 +946,7 @@ class App(tk.Tk):
             filler_mode="pyautogui",
             filler_config={
                 "review_score_check_enabled": bool(self.review_score_check_var.get()),
+                "batch_mode": batch_mode,
                 "score_readback_delay_seconds": 0.25,
             },
             on_score_callback=self._tune_add_record,
@@ -1352,6 +1359,8 @@ class App(tk.Tk):
             f"正确分数：{manual_score}",
             f"状态：{record.status}",
         ]
+        if record.manual_score is not None and record.manual_score != record.ai_score:
+            info_lines.append(f"错误原因：{record.error_reason or '未填写'}")
         for line in info_lines:
             ttk.Label(frame, text=line).pack(anchor="w")
 
@@ -1426,6 +1435,7 @@ class App(tk.Tk):
             criteria=record.criteria,
             ai_response=record.ai_response,
             image_path=record.image_path,
+            error_reason=record.error_reason,
         )
         self._record_db_ids[record.index] = db_id
         return db_id
@@ -1446,7 +1456,7 @@ class App(tk.Tk):
             self._save_score_record(record, question_index)
         except Exception as e:
             print(f"[评分数据库] 写入失败：{e}")
-        self.tune_tree.insert("", "end", values=(idx, score, "—", "待标记"))
+        self.tune_tree.insert("", "end", values=(idx, score, "—", "", "待标记"))
         q_label = f"题目 {question_index}" if question_index is not None else "当前题目"
         print(f"[规则调优] 记录 #{idx} 已添加 | {q_label} | AI分数：{score}分")
         self._tune_update_status()
@@ -1458,6 +1468,7 @@ class App(tk.Tk):
             vals = item["values"]
             if vals:
                 self.tune_manual_var.set(str(vals[1]))  # 预设为 AI 分数
+                self.tune_reason_var.set(str(vals[3]) if len(vals) > 3 else "")
 
     def _tune_mark_score(self):
         sel = self.tune_tree.selection()
@@ -1473,6 +1484,7 @@ class App(tk.Tk):
         except ValueError:
             messagebox.showerror("错误", "分数必须是整数")
             return
+        reason = self.tune_reason_var.get().strip()
 
         item = self.tune_tree.item(sel[0])
         try:
@@ -1480,16 +1492,20 @@ class App(tk.Tk):
         except (TypeError, ValueError):
             messagebox.showerror("错误", "记录序号无效")
             return
-        ok = self.tuner.set_manual_score(idx, manual)
+        ai_score = next((r.ai_score for r in self.tuner.records if r.index == idx), None)
+        if ai_score is not None and manual != ai_score and not reason:
+            messagebox.showwarning("提示", "正确分数与 AI 分数不同时，请填写错误原因")
+            return
+        ok = self.tuner.set_manual_score(idx, manual, reason)
         if not ok:
             return
         # 更新 treeview
         record = next(r for r in self.tuner.records if r.index == idx)
-        self.tune_tree.item(sel[0], values=(idx, record.ai_score, manual, record.status))
+        self.tune_tree.item(sel[0], values=(idx, record.ai_score, manual, record.error_reason, record.status))
         db_id = self._record_db_ids.get(idx)
         if db_id is not None:
             try:
-                self.score_db.update_manual_score(db_id, manual, record.status)
+                self.score_db.update_manual_score(db_id, manual, record.status, record.error_reason)
             except Exception as e:
                 print(f"[评分数据库] 更新人工分失败：{e}")
         if self._tune_preview_item == sel[0]:

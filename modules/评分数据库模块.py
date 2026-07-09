@@ -27,6 +27,7 @@ class ScoringDatabase:
         "base_url",
         "ai_score",
         "manual_score",
+        "error_reason",
         "status",
         "criteria",
         "ai_response",
@@ -46,6 +47,7 @@ class ScoringDatabase:
         "base_url": "Base URL",
         "ai_score": "AI分数",
         "manual_score": "人工分数",
+        "error_reason": "错误原因",
         "status": "状态",
         "criteria": "评分标准",
         "ai_response": "AI响应",
@@ -88,6 +90,7 @@ class ScoringDatabase:
                     base_url TEXT,
                     ai_score REAL NOT NULL,
                     manual_score REAL,
+                    error_reason TEXT,
                     status TEXT NOT NULL,
                     criteria TEXT,
                     ai_response TEXT,
@@ -97,6 +100,11 @@ class ScoringDatabase:
                 )
                 """
             )
+            existing_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(scoring_records)").fetchall()
+            }
+            if "error_reason" not in existing_columns:
+                conn.execute("ALTER TABLE scoring_records ADD COLUMN error_reason TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_scoring_records_session_record
@@ -122,6 +130,7 @@ class ScoringDatabase:
             "base_url": record.get("base_url", ""),
             "ai_score": record.get("ai_score"),
             "manual_score": record.get("manual_score"),
+            "error_reason": record.get("error_reason", ""),
             "status": record.get("status", "待标记"),
             "criteria": record.get("criteria", ""),
             "ai_response": record.get("ai_response", ""),
@@ -136,15 +145,15 @@ class ScoringDatabase:
             cur = conn.execute(sql, [values[col] for col in columns])
             return int(cur.lastrowid)
 
-    def update_manual_score(self, record_id: int, manual_score: int | float | None, status: str):
+    def update_manual_score(self, record_id: int, manual_score: int | float | None, status: str, error_reason: str = ""):
         with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE scoring_records
-                SET manual_score = ?, status = ?, updated_at = ?
+                SET manual_score = ?, error_reason = ?, status = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (manual_score, status, self._now(), record_id),
+                (manual_score, error_reason, status, self._now(), record_id),
             )
 
     def get_stats(self) -> dict[str, Any]:

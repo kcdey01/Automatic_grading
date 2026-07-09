@@ -9,13 +9,14 @@ import threading
 import time
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Mapping
 
-from modules.自动填分模块 import AutoFiller
+from modules.自动填分模块 import AutoFiller, ScoreMismatchError
 from modules.自动截图模块 import ScreenshotTool
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer
 
 
-def check_dependencies(required_modules=None):
+def check_dependencies(required_modules: Mapping[str, str] | None = None) -> tuple[bool, list[str]]:
     if required_modules is None:
         required_modules = {
             "pyautogui": "pyautogui",
@@ -118,7 +119,10 @@ class AutoScoringSystem:
         import traceback
 
         traceback.print_exc()
-        if isinstance(error, (TimeoutError, ConnectionError)):
+        if isinstance(error, ScoreMismatchError):
+            print("[停止] 回评/二评分数不一致，阅卷已终止")
+            self.running = False
+        elif isinstance(error, (TimeoutError, ConnectionError)):
             print("[停止] API 连接异常，阅卷已终止")
             self.running = False
 

@@ -8,8 +8,13 @@
 import time
 import tkinter as tk
 from tkinter import messagebox
+from decimal import Decimal, InvalidOperation
 
 import pyautogui
+
+
+class ScoreMismatchError(RuntimeError):
+    """Raised when review/second-review score verification blocks submission."""
 
 
 class AutoFiller:
@@ -32,6 +37,87 @@ class AutoFiller:
         self._browser = None
         self._playwright = None
         self._page = None
+
+    def _review_score_check_enabled(self):
+        return bool(self.config.get("review_score_check_enabled", True))
+
+    def _readback_delay_seconds(self):
+        try:
+            return max(0.0, float(self.config.get("score_readback_delay_seconds", 0.25)))
+        except (TypeError, ValueError):
+            return 0.25
+
+    def _normalize_score_value(self, value):
+        text = str(value).strip().replace("，", ".").replace("。", ".")
+        if text.endswith("分"):
+            text = text[:-1].strip()
+        try:
+            return Decimal(text).normalize()
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _show_score_mismatch_warning(self, expected, actual):
+        msg = (
+            "回评/二评分数校验失败，已中断填分和提交。\n\n"
+            f"待提交分数：{expected}\n"
+            f"输入框原分数：{actual or '(空)'}\n\n"
+            "请人工检查后再继续。"
+        )
+
+        def _show():
+            messagebox.showwarning("分数不一致", msg)
+
+        try:
+            self.root.after(0, _show)
+        except Exception:
+            _show()
+
+    def _ensure_score_matches(self, expected, actual):
+        actual = str(actual).strip()
+        expected_norm = self._normalize_score_value(expected)
+        actual_norm = self._normalize_score_value(actual)
+        if expected_norm is not None and actual_norm is not None:
+            matches = expected_norm == actual_norm
+        else:
+            matches = str(expected).strip() == str(actual).strip()
+        if matches:
+            print(f"[回评/二评校验] 通过：待提交={expected}，输入框原分数={actual}")
+            return
+        print(f"[回评/二评校验] 不一致：待提交={expected}，输入框原分数={actual or '(空)'}")
+        self._show_score_mismatch_warning(expected, actual)
+        raise ScoreMismatchError(f"回评/二评分数不一致：待提交={expected}，输入框原分数={actual or '(空)'}")
+
+    def _read_focused_input_text(self):
+        previous_clipboard = None
+        try:
+            previous_clipboard = self.root.clipboard_get()
+        except Exception:
+            previous_clipboard = None
+
+        method = self.select_all_method
+        if method == self.SELECT_ALL_HOME_SHIFT_END:
+            pyautogui.press("home")
+            pyautogui.hotkey("shift", "end")
+        elif method == self.SELECT_ALL_CTRL_A:
+            pyautogui.hotkey("ctrl", "a")
+        else:
+            pyautogui.tripleClick(self.score_input_pos)
+        time.sleep(0.04)
+        pyautogui.hotkey("ctrl", "c")
+        time.sleep(0.08)
+
+        try:
+            text = self.root.clipboard_get()
+        except Exception:
+            text = ""
+
+        try:
+            self.root.clipboard_clear()
+            if previous_clipboard is not None:
+                self.root.clipboard_append(previous_clipboard)
+        except Exception:
+            pass
+        return str(text).strip()
 
     def _select_position(self, title, prompt, attr_name, success_name):
         # 使用全屏蒙层记录“屏幕绝对坐标”，避免窗口内相对坐标导致点偏
@@ -138,10 +224,16 @@ class AutoFiller:
 
         if not score_selector:
             raise ValueError("DOM 模式请先填写分数输入框 CSS 选择器")
-        if not submit_selector:
+        if not submit_selector and not self._review_score_check_enabled():
             raise ValueError("DOM 模式请先填写提交按钮 CSS 选择器")
 
         page.wait_for_selector(score_selector, timeout=8000)
+        if self._review_score_check_enabled():
+            actual_score = page.eval_on_selector(score_selector, "el => el.value ?? el.textContent ?? ''")
+            self._ensure_score_matches(score, actual_score)
+            page.fill(score_selector, str(score))
+            print("[回评/二评校验] 已填分，跳过提交和下一题点击")
+            return
         page.fill(score_selector, str(score))
         page.wait_for_selector(submit_selector, timeout=8000)
         page.click(submit_selector)
@@ -241,6 +333,8 @@ class AutoFiller:
         if self.mode == "dom":
             try:
                 self._fill_score_dom(score)
+            except ScoreMismatchError:
+                raise
             except Exception as e:
                 print(f"DOM 填分错误：{e}")
             return
@@ -250,9 +344,18 @@ class AutoFiller:
             if self.score_input_pos:
                 pyautogui.click(self.score_input_pos)
                 time.sleep(0.12)
+                if self._review_score_check_enabled():
+                    actual_score = self._read_focused_input_text()
+                    self._ensure_score_matches(score, actual_score)
+                    pyautogui.click(self.score_input_pos)
+                    time.sleep(0.05)
+                    self._select_all_and_clear()
+                    pyautogui.typewrite(str(score))
+                    print("[回评/二评校验] 已填分，跳过提交和下一题点击")
+                    return
                 self._select_all_and_clear()
                 pyautogui.typewrite(str(score))
-                time.sleep(0.08)
+                time.sleep(self._readback_delay_seconds())
                 pyautogui.press("tab")
 
                 if self.submit_btn_pos:
@@ -261,6 +364,8 @@ class AutoFiller:
 
                     if self.next_btn_pos:
                         pyautogui.click(self.next_btn_pos)
+        except ScoreMismatchError:
+            raise
         except Exception as e:
             print(f"填分错误：{e}")
 

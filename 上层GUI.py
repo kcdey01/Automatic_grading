@@ -7,26 +7,26 @@
 python 上层GUI.py
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import json
 import os
 import queue
-import requests
 import sys
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any, Callable
 
 from PIL import Image, ImageTk
 
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动截图模块 import format_tk_geometry, get_virtual_screen_geometry
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
-from modules.自动填分模块 import AutoFiller
+# AutoFiller was previously imported but not used in this file; remove to avoid unused-import errors
 from modules.规则调优模块 import RuleTuner, ScoringRecord
 from modules.评分数据库模块 import ScoringDatabase
 
@@ -48,8 +48,12 @@ class App(tk.Tk):
         super().__init__()
         self.title("自动阅卷 - 上层GUI")
         self.geometry("800x600")
-        self.attributes("-topmost", True)
-        self.after(200, self.lift)
+        self.attributes("-topmost", True)  # type: ignore
+        # call lift after a short delay; use a lambda to avoid type-checker
+        # complaints about the bound method signature
+        # mypy/pyright may report the type of `lift` as partially unknown; silence
+        # that complaint here.
+        self.after(200, lambda: self.lift())  # type: ignore
 
         self.config_path = Path(__file__).with_name("config.json")
         self.capture_dir = Path(__file__).with_name("captures")
@@ -134,7 +138,7 @@ class App(tk.Tk):
         win = tk.Toplevel(self)
         win.title("关于")
         win.resizable(False, False)
-        win.attributes("-topmost", True)
+        win.tk.call("wm", "attributes", str(win), "-topmost", True)
         ttk.Label(win, text="自动阅卷系统", font=("Microsoft YaHei UI", 14, "bold")).pack(padx=24, pady=(20, 8))
         ttk.Label(win, text=f"版本：{__version__}", font=("Microsoft YaHei UI", 10)).pack(padx=24, anchor="w")
         ttk.Label(win, text="项目地址：").pack(padx=24, anchor="w")
@@ -152,7 +156,16 @@ class App(tk.Tk):
 
         # ── 可滚动容器 ──
         self._canvas = tk.Canvas(self, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        def _scroll_canvas(*args: str) -> None:
+            self._canvas.tk.call(str(self._canvas), "yview", *args)
+
+        def _make_text_yview_command(text: tk.Text) -> Callable[..., None]:
+            def _scroll_text(*args: str) -> None:
+                text.tk.call(str(text), "yview", *args)
+
+            return _scroll_text
+
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=_scroll_canvas)
         self._canvas.configure(yscrollcommand=scrollbar.set)
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -160,13 +173,17 @@ class App(tk.Tk):
         inner = ttk.Frame(self._canvas)
         self._canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        def _configure_inner(event):
+        def _configure_inner(event: tk.Event) -> None:
             self._canvas.configure(scrollregion=self._canvas.bbox("all"))
             self._canvas.itemconfig(1, width=event.width)
         inner.bind("<Configure>", _configure_inner)
-        self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfig(1, width=e.width))
 
-        def _on_mousewheel(event):
+        def _configure_canvas(event: tk.Event) -> None:
+            self._canvas.itemconfig(1, width=event.width)
+
+        self._canvas.bind("<Configure>", _configure_canvas)
+
+        def _on_mousewheel(event: tk.Event) -> None:
             # 当鼠标悬停在带滚动条的 Text 控件上时，不触发 Canvas 滚动
             w = event.widget
             while w is not None:
@@ -182,7 +199,10 @@ class App(tk.Tk):
         self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         top = ttk.Frame(inner)
-        top.pack(fill=tk.X, **pad)
+        # Avoid passing geometry options as a positional argument to pack
+        # (some type checkers treat them as the first positional `cnf` arg).
+        # Expand padding explicitly to satisfy strict type checkers.
+        top.pack(side="top", fill=tk.X, padx=pad.get("padx", 0), pady=pad.get("pady", 0))
 
         ttk.Label(top, text="服务商").grid(row=0, column=0, sticky="w")
         self.provider_var = tk.StringVar(value="OpenAI")
@@ -222,21 +242,22 @@ class App(tk.Tk):
 
         top.columnconfigure(3, weight=1)
 
-        self.provider_var.trace_add("write", lambda *_: self._sync_provider_state())
+        # trace_add callback receives (name, index, mode) -> provide explicit params for static type checkers
+        self.provider_var.trace_add("write", lambda name, index, mode: self._sync_provider_state())
         self._sync_provider_state()
 
         criteria_frame = ttk.LabelFrame(inner, text="评分标准（直接粘贴你的阅卷要求/评分细则）")
-        criteria_frame.pack(fill=tk.BOTH, expand=False, **pad)
+        criteria_frame.pack(fill=tk.BOTH, expand=False, padx=pad["padx"], pady=pad["pady"])
         _criteria_inner = ttk.Frame(criteria_frame)
         _criteria_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.criteria_text = tk.Text(_criteria_inner, height=8, wrap="word")
-        _criteria_sb = ttk.Scrollbar(_criteria_inner, command=self.criteria_text.yview)
+        _criteria_sb = ttk.Scrollbar(_criteria_inner, command=_make_text_yview_command(self.criteria_text))
         self.criteria_text.configure(yscrollcommand=_criteria_sb.set)
         _criteria_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.criteria_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         mid = ttk.Frame(inner)
-        mid.pack(fill=tk.X, **pad)
+        mid.pack(fill=tk.X, padx=pad["padx"], pady=pad["pady"])
 
         self.batch_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="批量模式", variable=self.batch_var, command=self._sync_batch_state).grid(row=0, column=0, sticky="w")
@@ -289,6 +310,15 @@ class App(tk.Tk):
         _select_all_combo.grid(row=1, column=1, columnspan=2, padx=8, sticky="w")
         ttk.Label(runbox, text="避免评分网站快捷键冲突").grid(row=1, column=3, padx=4, sticky="w")
 
+        self.review_score_check_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            runbox,
+            text="回评/二评校验",
+            variable=self.review_score_check_var,
+            command=self._sync_filler_state,
+        ).grid(row=2, column=0, padx=8, pady=(4, 8), sticky="w")
+        ttk.Label(runbox, text="只填分并校验，不点击提交/下一题").grid(row=2, column=1, columnspan=3, padx=8, pady=(4, 8), sticky="w")
+
         # ── 规则调优 ──
         tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
         tune_frame.pack(fill=tk.BOTH, expand=False, **pad)
@@ -330,7 +360,7 @@ class App(tk.Tk):
         _tune_result_inner = ttk.Frame(tune_frame)
         _tune_result_inner.pack(fill=tk.X, padx=8, pady=(0, 4))
         self.tune_result_text = tk.Text(_tune_result_inner, height=4, wrap="word", state="disabled")
-        _tune_result_sb = ttk.Scrollbar(_tune_result_inner, command=self.tune_result_text.yview)
+        _tune_result_sb = ttk.Scrollbar(_tune_result_inner, command=_make_text_yview_command(self.tune_result_text))
         self.tune_result_text.configure(yscrollcommand=_tune_result_sb.set)
         _tune_result_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tune_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -358,7 +388,7 @@ class App(tk.Tk):
         _opt_result_inner = ttk.Frame(quick_frame)
         _opt_result_inner.pack(fill=tk.X, padx=8, pady=(0, 4))
         self.optimize_result_text = tk.Text(_opt_result_inner, height=4, wrap="word", state="disabled")
-        _opt_result_sb = ttk.Scrollbar(_opt_result_inner, command=self.optimize_result_text.yview)
+        _opt_result_sb = ttk.Scrollbar(_opt_result_inner, command=_make_text_yview_command(self.optimize_result_text))
         self.optimize_result_text.configure(yscrollcommand=_opt_result_sb.set)
         _opt_result_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.optimize_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -370,7 +400,7 @@ class App(tk.Tk):
         self.log_text = tk.Text(log_frame, wrap="word", height=12)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
 
-        sb = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        sb = ttk.Scrollbar(log_frame, command=_make_text_yview_command(self.log_text))
         sb.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=8)
         self.log_text.configure(yscrollcommand=sb.set)
 
@@ -464,6 +494,7 @@ class App(tk.Tk):
         width = int(max(1, rel_right - rel_x))
         height = int(max(1, rel_bottom - rel_y))
         return x, y, width, height
+
     def _make_overlay_click_through(self, window):
         if os.name != "nt":
             return
@@ -524,7 +555,10 @@ class App(tk.Tk):
             self.after(0, self._show_region_overlay)
 
     def _sync_filler_state(self):
-        return
+        if self.system is None:
+            return
+        self.system.filler.select_all_method = self._get_select_all_method()
+        self.system.filler.config["review_score_check_enabled"] = bool(self.review_score_check_var.get())
 
     def _fetch_models(self):
         provider = self.provider_var.get()
@@ -547,12 +581,15 @@ class App(tk.Tk):
             return
 
         extra_headers_raw = (self.extra_headers_var.get() or "").strip()
-        extra_headers = {}
+        extra_headers: dict[str, str] = {}
         if extra_headers_raw:
             try:
-                extra_headers = json.loads(extra_headers_raw)
-                if not isinstance(extra_headers, dict):
+                parsed_headers: Any = json.loads(extra_headers_raw)
+                if not isinstance(parsed_headers, dict):
                     raise ValueError("额外请求头必须是 JSON 对象")
+                if not all(isinstance(key, str) and isinstance(value, str) for key, value in parsed_headers.items()):
+                    raise ValueError("额外请求头的键和值都必须是字符串")
+                extra_headers = parsed_headers
             except Exception as e:
                 messagebox.showerror("配置错误", f"额外请求头JSON解析失败：{e}")
                 return
@@ -672,6 +709,7 @@ class App(tk.Tk):
             "blank_threshold": self._get_blank_threshold(),
             "filler_mode": "pyautogui",
             "select_all_method": self._get_select_all_method(),
+            "review_score_check_enabled": bool(self.review_score_check_var.get()),
         }
         cfg.update(self._collect_runtime_config())
         return cfg
@@ -710,6 +748,7 @@ class App(tk.Tk):
             if pos:
                 setattr(self.system.filler, key, tuple(pos))
         self.system.filler.select_all_method = self._get_select_all_method()
+        self.system.filler.config["review_score_check_enabled"] = bool(self.review_score_check_var.get())
         self._update_region_status()
         self._update_ready_status()
 
@@ -783,6 +822,9 @@ class App(tk.Tk):
             if label:
                 self.select_all_method_var.set(label)
 
+        if "review_score_check_enabled" in cfg:
+            self.review_score_check_var.set(bool(cfg["review_score_check_enabled"]))
+
         for key in ("screenshot_region_norm", "score_input_pos", "submit_btn_pos", "next_btn_pos"):
             if key in cfg:
                 self._runtime_config[key] = cfg.get(key)
@@ -835,6 +877,7 @@ class App(tk.Tk):
                 self.system.criteria = criteria
             self.system.batch_mode = bool(self.batch_var.get())
             self.system.blank_threshold = self._get_blank_threshold()
+            self._sync_filler_state()
             if self.system.batch_mode:
                 try:
                     self.system.total_questions = int(self.total_var.get() or "0")
@@ -895,7 +938,10 @@ class App(tk.Tk):
             scorer=scorer,
             capture_dir=str(self.capture_dir),
             filler_mode="pyautogui",
-            filler_config={},
+            filler_config={
+                "review_score_check_enabled": bool(self.review_score_check_var.get()),
+                "score_readback_delay_seconds": 0.25,
+            },
             on_score_callback=self._tune_add_record,
             on_region_selected=self._on_region_selected,
             on_position_selected=self._on_position_selected,
@@ -1034,6 +1080,7 @@ class App(tk.Tk):
             messagebox.showinfo("提示", "已在运行中。")
             return
 
+        self._sync_filler_state()
         sys_.question_count = 0
         sys_.start()
         self.progress_var.set("运行中…")

@@ -41,6 +41,28 @@ def format_tk_geometry(width: int, height: int, x: int, y: int) -> str:
     return f"{width}x{height}{x:+d}{y:+d}"
 
 
+def grab_virtual_screen():
+    """截取与 Windows 虚拟屏幕同尺寸的全屏图。
+
+    注意：裸调用 ImageGrab.grab(all_screens=True) 在部分多屏/DPI 环境下
+    会返回高度翻倍且下半部分无效的图像（如 3760x2800 vs 虚拟屏 3760x1400）。
+    使用虚拟屏幕 bbox 可得到与选择窗口、覆盖层一致的坐标系。
+    """
+    left, top, width, height = get_virtual_screen_geometry()
+    if width > 0 and height > 0:
+        try:
+            return ImageGrab.grab(
+                bbox=(left, top, left + width, top + height),
+                all_screens=True,
+            )
+        except Exception:
+            pass
+    try:
+        return ImageGrab.grab(all_screens=True)
+    except Exception:
+        return pyautogui.screenshot()
+
+
 class ScreenshotTool:
     """截图工具类"""
 
@@ -58,10 +80,7 @@ class ScreenshotTool:
         if self.before_capture:
             self.before_capture()
         try:
-            try:
-                return ImageGrab.grab(all_screens=True)
-            except Exception:
-                return pyautogui.screenshot()
+            return grab_virtual_screen()
         finally:
             if self.after_capture:
                 self.after_capture()
@@ -70,7 +89,7 @@ class ScreenshotTool:
         left, top, width, height = get_virtual_screen_geometry()
         img_w, img_h = screen_shot.size
 
-        # ImageGrab(all_screens=True) 的尺寸是裁剪依据；Windows 虚拟桌面坐标用于把窗口铺到所有屏幕。
+        # 截图与虚拟桌面使用同一坐标系；窗口铺到所有屏幕。
         if width <= 0 or height <= 0:
             width, height = img_w, img_h
 
@@ -89,16 +108,16 @@ class ScreenshotTool:
         canvas = tk.Canvas(selection_window, bg="black", highlightthickness=0)
         canvas.pack(fill=tk.BOTH, expand=True)
 
-        # 在同一张“虚拟屏幕全域”截图上框选，然后记录成“比例坐标”
-        # 优先使用 ImageGrab(all_screens=True) 解决多屏/DPI 缩放下范围不一致的问题
-        try:
-            screen_shot = ImageGrab.grab(all_screens=True)
-        except Exception:
-            screen_shot = pyautogui.screenshot()
+        # 用虚拟屏幕 bbox 截图，保证预览尺寸与窗口尺寸一致，避免压扁/错位
+        screen_shot = grab_virtual_screen()
         window_w, window_h, img_w, img_h = self._configure_selection_window(selection_window, screen_shot)
         if self.debug_print:
             print(f"全屏截图尺寸: {img_w}x{img_h}，选择窗口尺寸: {window_w}x{window_h}")
-        screen_image = ImageTk.PhotoImage(screen_shot)
+        if (img_w, img_h) != (window_w, window_h):
+            preview = screen_shot.resize((window_w, window_h), Image.Resampling.LANCZOS)
+        else:
+            preview = screen_shot
+        screen_image = ImageTk.PhotoImage(preview)
         self.screen_image_ref = screen_image
         canvas.create_image(0, 0, anchor=tk.NW, image=screen_image)
 
@@ -171,12 +190,13 @@ class ScreenshotTool:
         canvas = tk.Canvas(selection_window, bg="black", highlightthickness=0)
         canvas.pack(fill=tk.BOTH, expand=True)
 
-        try:
-            screen_shot = ImageGrab.grab(all_screens=True)
-        except Exception:
-            screen_shot = pyautogui.screenshot()
+        screen_shot = grab_virtual_screen()
         window_w, window_h, img_w, img_h = self._configure_selection_window(selection_window, screen_shot)
-        screen_image = ImageTk.PhotoImage(screen_shot)
+        if (img_w, img_h) != (window_w, window_h):
+            preview = screen_shot.resize((window_w, window_h), Image.Resampling.LANCZOS)
+        else:
+            preview = screen_shot
+        screen_image = ImageTk.PhotoImage(preview)
         self.screen_image_ref = screen_image
         canvas.create_image(0, 0, anchor=tk.NW, image=screen_image)
 

@@ -11,7 +11,7 @@ from typing import Optional
 import requests
 
 
-from modules.自动评分模块 import call_llm_text
+from modules.自动评分模块 import API_TIMEOUT_SECONDS, call_llm_text
 
 
 class ScoringRecord:
@@ -75,7 +75,7 @@ class RuleTuner:
             model=self.model,
             prompt=prompt,
             extra_headers=self.extra_headers,
-            timeout=120,
+            timeout=API_TIMEOUT_SECONDS,
             api_type=getattr(self, "api_type", None),
         )
 

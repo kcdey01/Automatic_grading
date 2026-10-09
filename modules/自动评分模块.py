@@ -19,7 +19,11 @@ _THINKING_MODEL_KEYWORDS = ["mimo", "qwen3", "deepseek-r1", "qwq", "thinking"]
 # 明确禁用思考模式时使用的模型名标记
 _THINKING_OFF_MARKERS = ["no-think", "nothink", "thinking-off", "non-thinking"]
 
-_API_MAX_ATTEMPTS = 3
+# API 单次响应超时（秒）
+API_TIMEOUT_SECONDS = 60
+
+# 超时/连接失败时的重试策略：最多重试 1 次（首次 + 1 次重试 = 共 2 次尝试）
+_API_MAX_ATTEMPTS = 2
 _API_RETRY_BACKOFF_SECONDS = 1.0
 
 # 服务端拒绝 thinking 参数时返回的错误特征串（小写匹配）
@@ -176,7 +180,7 @@ def _build_auth_headers(
 
 
 def _request_with_retries(method: str, url: str, **kwargs) -> requests.Response:
-    """对 API 超时和临时网络错误进行有限重试。"""
+    """对 API 超时和临时网络错误进行有限重试（最多重试 1 次）。"""
     last_error = None
     for attempt in range(1, _API_MAX_ATTEMPTS + 1):
         try:
@@ -186,7 +190,7 @@ def _request_with_retries(method: str, url: str, **kwargs) -> requests.Response:
             if attempt >= _API_MAX_ATTEMPTS:
                 break
             wait_seconds = _API_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-            print(f"[API重试] 第 {attempt} 次请求失败：{e}，{wait_seconds:.1f} 秒后重试")
+            print(f"[API重试] 第 {attempt} 次请求失败：{e}，{wait_seconds:.1f} 秒后重试（仅重试 1 次）")
             time.sleep(wait_seconds)
     raise last_error
 
@@ -195,7 +199,7 @@ def fetch_openai_compatible_models(
     base_url: str,
     api_key: str,
     extra_headers: Mapping[str, str] | None = None,
-    timeout: int = 30,
+    timeout: int = API_TIMEOUT_SECONDS,
 ) -> list[str]:
     """从 OpenAI 兼容接口读取 /models，返回模型 id 列表。"""
     base_url = (base_url or "").strip().rstrip("/")
@@ -235,7 +239,7 @@ def fetch_openai_compatible_models(
 
 def call_llm_text(
   base_url: str, api_key: str, model: str, prompt: str,
-  extra_headers: dict | None = None, timeout: int = 30,
+  extra_headers: dict | None = None, timeout: int = API_TIMEOUT_SECONDS,
   api_type: str | None = None,
 ) -> str:
     """
@@ -501,7 +505,7 @@ class OpenAICompatibleScorer(BaseScorer):
         api_key: str,
         model: str,
         extra_headers=None,
-        timeout=60,
+        timeout=API_TIMEOUT_SECONDS,
         enable_thinking: bool | None = None,
         api_type: str | None = None,
     ):
@@ -723,7 +727,7 @@ class BaiduScorer(BaseScorer):
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             },
-            timeout=30,
+            timeout=API_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         return resp.json()["access_token"]
@@ -748,7 +752,7 @@ class BaiduScorer(BaseScorer):
             ],
         }
 
-        resp = _request_with_retries("POST", url, json=payload, timeout=60)
+        resp = _request_with_retries("POST", url, json=payload, timeout=API_TIMEOUT_SECONDS)
         resp.raise_for_status()
         data = resp.json()
         # 百度千帆的响应 key 是 "result"
@@ -827,7 +831,7 @@ class XunfeiScorer(BaseScorer):
             "Authorization": authorization,
         }
 
-        resp = _request_with_retries("POST", self._base_url, json=payload, headers=headers, timeout=60)
+        resp = _request_with_retries("POST", self._base_url, json=payload, headers=headers, timeout=API_TIMEOUT_SECONDS)
         resp.raise_for_status()
         data = resp.json()
 

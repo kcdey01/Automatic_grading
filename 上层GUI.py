@@ -11,7 +11,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -30,7 +30,14 @@ from PIL import Image, ImageTk
 
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动截图模块 import format_tk_geometry, get_virtual_screen_geometry
-from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
+from modules.自动评分模块 import (
+    API_TIMEOUT_SECONDS,
+    OpenAICompatibleScorer,
+    ZhipuAIScorer,
+    BaiduScorer,
+    XunfeiScorer,
+    fetch_openai_compatible_models,
+)
 from modules.多模型校验模块 import MultiModelCrossChecker
 from modules.系统通知模块 import send_windows_notification
 # AutoFiller was previously imported but not used in this file; remove to avoid unused-import errors
@@ -1091,7 +1098,7 @@ class App(tk.Tk):
                     base_url=base_url,
                     api_key=api_key,
                     extra_headers=extra_headers,
-                    timeout=30,
+                    timeout=API_TIMEOUT_SECONDS,
                 )
                 self.after(0, self._ap_fetch_done, models)
             except Exception as e:
@@ -1558,7 +1565,7 @@ class App(tk.Tk):
                     base_url=base_url,
                     api_key=api_key,
                     extra_headers=extra_headers,
-                    timeout=30,
+                    timeout=API_TIMEOUT_SECONDS,
                 )
                 self.after(0, self._fetch_models_done, models)
             except Exception as e:
@@ -2431,23 +2438,23 @@ class App(tk.Tk):
 
             # 复用现有评分器发送请求（已验证的工作路径，兼容所有服务商）
             sys_ = self._ensure_system()
-            # 强制延长超时，避免长 prompt 推理中断
+            # 统一超时 60s（如需调整见 modules/自动评分模块.py 的 API_TIMEOUT_SECONDS）
             if hasattr(sys_.scorer, "timeout"):
-                sys_.scorer.timeout = 180
+                sys_.scorer.timeout = API_TIMEOUT_SECONDS
             # 打印诊断信息
             if hasattr(sys_.scorer, "base_url"):
                 print(f"[生成评分标准] 请求 URL 基础路径: {sys_.scorer.base_url}")
 
-            # 带重试的评分调用
+            # 带重试的评分调用（最多重试 1 次）
             last_err = None
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     sys_.scorer.grade_answer(temp_path, prompt)
                     break
                 except Exception as retry_err:
                     last_err = retry_err
-                    if attempt < 2:
-                        print(f"[生成评分标准] 第 {attempt+1} 次失败，2 秒后重试: {retry_err}")
+                    if attempt < 1:
+                        print(f"[生成评分标准] 第 {attempt+1} 次失败，2 秒后重试（仅重试 1 次）: {retry_err}")
                         time.sleep(2)
                     else:
                         raise last_err
@@ -3202,7 +3209,7 @@ class App(tk.Tk):
                     model=model,
                     prompt=prompt,
                     extra_headers=extra_headers,
-                    timeout=120,
+                    timeout=API_TIMEOUT_SECONDS,
                     api_type=self._resolve_api_type(),
                 )
                 self.after(0, self._optimize_done, result)

@@ -5,6 +5,8 @@ config.json
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.pytest_cache/
 
 # 评分数据库（含评分标准、AI 响应和截图路径）
 scores.db
@@ -18,10 +20,18 @@ captures/
 
 # 虚拟环境
 venv/
+.venv/
 build_env/
+env/
 
 # 待办
 todo
+
+# 本地版本归档（小谷的版本管理产物，不入库）
+_versions/
+
+# 工作台工作记忆（不入库）
+.workbuddy/
 
 # PyInstaller 构建产物
 build/
@@ -29,7 +39,12 @@ dist/
 *.spec.bak
 *.exe
 *.app
+*.egg-info/
+*.manifest
 
-# 操作系统文件
+# 编辑器/系统
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
+desktop.ini

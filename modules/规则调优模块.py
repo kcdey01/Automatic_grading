@@ -44,12 +44,13 @@ class RuleTuner:
         self.records: list[ScoringRecord] = []
         self.suggested_criteria = ""
 
-    def update_config(self, api_key="", base_url="", model="", extra_headers=None):
+    def update_config(self, api_key="", base_url="", model="", extra_headers=None, api_type=None):
         """同步 API 配置"""
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.extra_headers = extra_headers or {}
+        self.api_type = api_type
 
     def add_record(self, record: ScoringRecord):
         self.records.append(record)
@@ -70,6 +71,7 @@ class RuleTuner:
             prompt=prompt,
             extra_headers=self.extra_headers,
             timeout=120,
+            api_type=getattr(self, "api_type", None),
         )
 
     def tune(self, original_criteria: str) -> Optional[str]:

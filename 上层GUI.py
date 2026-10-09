@@ -30,6 +30,13 @@ from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, Ba
 from modules.规则调优模块 import RuleTuner, ScoringRecord
 from modules.评分数据库模块 import ScoringDatabase
 
+# 「接口类型」下拉框显示文本 -> 内部常量
+_API_TYPE_BY_LABEL = {
+    "自动判断": "auto",
+    "Chat Completions": "chat",
+    "Responses API": "responses",
+}
+
 
 class _QueueStdout:
     def __init__(self, q: "queue.Queue[str]"):
@@ -239,6 +246,30 @@ class App(tk.Tk):
         self.extra_headers_var = tk.StringVar(value="")
         self.extra_headers_entry = ttk.Entry(top, textvariable=self.extra_headers_var, width=90)
         self.extra_headers_entry.grid(row=3, column=1, columnspan=3, sticky="we", padx=(6, 0))
+
+        ttk.Label(top, text="思考模式").grid(row=4, column=0, sticky="w")
+        self.thinking_mode_var = tk.StringVar(value="自动")
+        self.thinking_mode_combo = ttk.Combobox(
+            top,
+            textvariable=self.thinking_mode_var,
+            width=18,
+            values=["自动", "关闭", "开启"],
+            state="readonly",
+        )
+        self.thinking_mode_combo.grid(row=4, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(top, text="部分网关不支持 thinking 参数，报400时选「关闭」").grid(row=4, column=2, columnspan=2, sticky="w", padx=(12, 0))
+
+        ttk.Label(top, text="接口类型").grid(row=5, column=0, sticky="w")
+        self.api_type_var = tk.StringVar(value="自动判断")
+        self.api_type_combo = ttk.Combobox(
+            top,
+            textvariable=self.api_type_var,
+            width=18,
+            values=list(_API_TYPE_BY_LABEL.keys()),
+            state="readonly",
+        )
+        self.api_type_combo.grid(row=5, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(top, text="自动判断=按域名识别；网关只支持一种协议时手动指定").grid(row=5, column=2, columnspan=2, sticky="w", padx=(12, 0))
 
         top.columnconfigure(3, weight=1)
 
@@ -701,6 +732,30 @@ class App(tk.Tk):
             self.base_url_entry.configure(state="normal")
             self.extra_headers_entry.configure(state="normal")
 
+    def _resolve_api_type(self) -> str:
+        """把界面上的「接口类型」下拉框取值翻译成内部常量。
+
+        自动判断 -> "auto"（按域名识别）
+        Chat Completions -> "chat"
+        Responses API -> "responses"
+        """
+        label = (self.api_type_var.get() or "").strip()
+        return _API_TYPE_BY_LABEL.get(label, "auto")
+
+    def _resolve_thinking_flag(self) -> bool | None:
+        """把界面上的「思考模式」三态选项翻译成评分器的 enable_thinking 参数。
+
+        自动 -> None（按模型名判断，服务端拒绝时自动降级重试）
+        关闭 -> False（永不发thinking，绕开不支持该参数的网关）
+        开启 -> True
+        """
+        mode = self.thinking_mode_var.get()
+        if mode == "关闭":
+            return False
+        if mode == "开启":
+            return True
+        return None
+
     def _collect_config(self) -> dict:
         cfg = {
             "provider": self.provider_var.get(),
@@ -708,6 +763,8 @@ class App(tk.Tk):
             "model": self.model_var.get(),
             "base_url": self.base_url_var.get(),
             "extra_headers_json": self.extra_headers_var.get(),
+            "thinking_mode": self.thinking_mode_var.get(),
+            "api_type": self.api_type_var.get(),
             "criteria": self.criteria_text.get("1.0", "end").strip(),
             "batch_mode": bool(self.batch_var.get()),
             "total_questions": self.total_var.get(),
@@ -800,6 +857,14 @@ class App(tk.Tk):
             self.base_url_var.set(str(cfg["base_url"]))
         if "extra_headers_json" in cfg:
             self.extra_headers_var.set(str(cfg["extra_headers_json"]))
+        if "thinking_mode" in cfg:
+            mode = str(cfg["thinking_mode"])
+            if mode in ("自动", "关闭", "开启"):
+                self.thinking_mode_var.set(mode)
+        if "api_type" in cfg:
+            label = str(cfg["api_type"])
+            if label in _API_TYPE_BY_LABEL:
+                self.api_type_var.set(label)
 
         if "criteria" in cfg:
             self.criteria_text.delete("1.0", "end")
@@ -933,6 +998,8 @@ class App(tk.Tk):
                 api_key=api_key,
                 model=model,
                 extra_headers=extra_headers,
+                enable_thinking=self._resolve_thinking_flag(),
+                api_type=self._resolve_api_type(),
             )
 
         self.system = AutoScoringSystem(
@@ -1536,7 +1603,13 @@ class App(tk.Tk):
                 extra_headers = json.loads(extra_headers_raw)
             except Exception:
                 pass
-        self.tuner.update_config(api_key=api_key, base_url=base_url, model=model, extra_headers=extra_headers)
+        self.tuner.update_config(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            extra_headers=extra_headers,
+            api_type=self._resolve_api_type(),
+        )
 
         self._tuning_running = True
         self.tune_status_var.set("正在分析调优…")
@@ -1670,6 +1743,7 @@ class App(tk.Tk):
                     prompt=prompt,
                     extra_headers=extra_headers,
                     timeout=120,
+                    api_type=self._resolve_api_type(),
                 )
                 self.after(0, self._optimize_done, result)
             except Exception as e:

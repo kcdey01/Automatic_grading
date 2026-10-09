@@ -16,14 +16,75 @@ import requests
 # 支持思考模式的模型列表（模型名关键词匹配）
 _THINKING_MODEL_KEYWORDS = ["mimo", "qwen3", "deepseek-r1", "qwq", "thinking"]
 
+# 明确禁用思考模式时使用的模型名标记
+_THINKING_OFF_MARKERS = ["no-think", "nothink", "thinking-off", "non-thinking"]
+
 _API_MAX_ATTEMPTS = 3
 _API_RETRY_BACKOFF_SECONDS = 1.0
 
+# 服务端拒绝 thinking 参数时返回的错误特征串（小写匹配）
+_UNSUPPORTED_THINKING_MARKERS = [
+    "unsupportedparamserror",
+    "does not support parameters",
+    "unsupported parameter",
+    "unsupported_params",
+    "drop_params",
+]
+
+# 开启思考模式时依次尝试的参数写法（按兼容性从高到低）。
+# 实测：LiteLLM 网关会拒绝顶层 "thinking"/"reasoning_effort" 键（报 UnsupportedParamsError），
+# 但接受 vLLM 原生的 "enable_thinking"，以及放在 "extra_body" 里的嵌套写法。
+_THINKING_PARAM_STYLES = [
+    ("enable_thinking", {"enable_thinking": True}),
+    ("extra_body.thinking", {"extra_body": {"thinking": {"type": "enabled"}}}),
+    ("thinking", {"thinking": {"type": "enabled"}}),
+]
+
+# 关闭思考模式时的候选写法
+_THINKING_OFF_STYLES = [
+    ("enable_thinking=false", {"enable_thinking": False}),
+    ("extra_body.thinking=disabled", {"extra_body": {"thinking": {"type": "disabled"}}}),
+    ("thinking=disabled", {"thinking": {"type": "disabled"}}),
+]
+
 
 def _supports_thinking(model_name: str) -> bool:
-    """判断模型是否支持思考模式"""
-    name_lower = model_name.lower()
+    """判断模型是否可能支持思考模式（仅凭模型名推测，可能被服务端拒绝，故需配合降级重试）"""
+    name_lower = (model_name or "").lower()
+    if any(marker in name_lower for marker in _THINKING_OFF_MARKERS):
+        return False
     return any(kw in name_lower for kw in _THINKING_MODEL_KEYWORDS)
+
+
+def _apply_thinking_param(payload: dict, style_index: int, enabled: bool) -> str:
+    """按给定序号往 payload 写入思考参数，返回使用的写法名。"""
+    styles = _THINKING_PARAM_STYLES if enabled else _THINKING_OFF_STYLES
+    name, params = styles[style_index % len(styles)]
+    payload.update(params)
+    return name
+
+
+def _should_send_thinking_error_only(resp) -> bool:
+    """响应失败且错误信息明确指向思考参数（用于最后的兜底重试判断）。"""
+    return (
+        not resp.ok
+        and _is_unsupported_thinking_error(resp.status_code, resp.text)
+    )
+
+
+def _is_unsupported_thinking_error(status_code: int, body: str) -> bool:
+    """
+    判断一个 4xx 响应是否是「服务端不认识 thinking 参数」导致的。
+
+    典型报错（LiteLLM 网关）：
+        litellm.UnsupportedParamsError: openai does not support parameters: ['thinking']
+    """
+    if status_code not in (400, 422):
+        return False
+    body_lower = (body or "").lower()
+    if "thinking" not in body_lower:
+        return False
+    return any(marker in body_lower for marker in _UNSUPPORTED_THINKING_MARKERS)
 
 
 # 系统级提示：强制 AI 输出结构化结果，便于自动提取分数和调试。
@@ -52,9 +113,43 @@ FINAL_SCORE_INSTRUCTION = (
 )
 
 
-def _is_responses_api_endpoint(base_url: str) -> bool:
-    """检测是否为 Responses API 端点（火山引擎方舟等使用）"""
-    return "volces.com" in base_url
+# 接口类型选项 -> 是否使用 Responses API
+_API_TYPE_AUTO = "auto"
+_API_TYPE_CHAT = "chat"
+_API_TYPE_RESPONSES = "responses"
+
+_API_TYPE_CHOICES = {
+    _API_TYPE_AUTO: "自动判断",
+    _API_TYPE_CHAT: "Chat Completions",
+    _API_TYPE_RESPONSES: "Responses API",
+}
+
+
+def normalize_api_type(api_type: str | None) -> str:
+    """把界面上的接口类型取值规整为内部常量，非法值回落到自动判断。"""
+    if not api_type:
+        return _API_TYPE_AUTO
+    normalized = str(api_type).strip().lower()
+    # 容忍直接写 URL 后缀或英文值的各种写法
+    if normalized in ("chat", "chat_completions", "chat-completions", "chatcompletion", "openai"):
+        return _API_TYPE_CHAT
+    if normalized in ("response", "responses", "responses_api", "responses-api", "responsesapi"):
+        return _API_TYPE_RESPONSES
+    return _API_TYPE_AUTO
+
+
+def _is_responses_api_endpoint(base_url: str, api_type: str | None = None) -> bool:
+    """判断是否走 Responses API。
+
+    ``api_type`` 为显式设置时优先生效（自动/关闭用Chat Completions，开启用Responses API）；
+    为自动判断时，沿用按域名识别的历史行为（火山引擎方舟等）。
+    """
+    resolved = normalize_api_type(api_type)
+    if resolved == _API_TYPE_CHAT:
+        return False
+    if resolved == _API_TYPE_RESPONSES:
+        return True
+    return "volces.com" in (base_url or "").lower()
 
 
 def _is_mimo_endpoint(base_url: str) -> bool:
@@ -139,17 +234,19 @@ def fetch_openai_compatible_models(
 
 
 def call_llm_text(
-    base_url: str, api_key: str, model: str, prompt: str,
-    extra_headers: dict | None = None, timeout: int = 30,
+  base_url: str, api_key: str, model: str, prompt: str,
+  extra_headers: dict | None = None, timeout: int = 30,
+  api_type: str | None = None,
 ) -> str:
     """
     通用文本 LLM 调用，自动适配标准 OpenAI Chat Completions 和 Responses API（火山引擎）。
+    ``api_type`` 可显式指定接口类型（auto/chat/responses），为空时按域名自动判断。
     返回 AI 回复文本。
     """
     base_url = (base_url or "").strip().rstrip("/")
     headers = _build_auth_headers(api_key, base_url, extra_headers)
 
-    if _is_responses_api_endpoint(base_url):
+    if _is_responses_api_endpoint(base_url, api_type):
         url = f"{base_url}/responses"
         payload = {
             "model": model,
@@ -398,17 +495,54 @@ class OpenAICompatibleScorer(BaseScorer):
     兼容常见的 /v1/chat/completions 结构（含图文 messages）。
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, extra_headers=None, timeout=60):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        extra_headers=None,
+        timeout=60,
+        enable_thinking: bool | None = None,
+        api_type: str | None = None,
+    ):
+        """
+        :param enable_thinking:
+            - ``True``  强制发送 thinking 参数
+            - ``False`` 永不发送（部分 OpenAI 兼容网关会因未知参数返回 400）
+            - ``None``  按模型名自动判断；若服务端拒绝则自动降级重试（默认）
+        :param api_type:
+            接口类型：``"auto"`` 按域名自动判断 / ``"chat"`` 强制 Chat Completions /
+            ``"responses"`` 强制 Responses API。
+        """
         super().__init__(model=model)
         self.base_url = (base_url or "").strip().rstrip("/")
         self.api_key = (api_key or "").strip()
         self.extra_headers = extra_headers or {}
         self.timeout = timeout
+        self.api_type = normalize_api_type(api_type)
+        # None=自动；记录思考参数当前尝试到第几种写法，全部失败则放弃
+        self.enable_thinking = enable_thinking
+        self._thinking_style_index = 0
+        self._thinking_given_up = False
 
         if not self.base_url:
             raise ValueError("base_url 不能为空（例如 https://api.openai.com）")
         if not self.api_key:
             raise ValueError("api_key 不能为空")
+
+    def _should_send_thinking(self) -> bool:
+        """最终决定本次请求是否携带 thinking 参数。"""
+        if self._thinking_given_up:
+            return False
+        if self.enable_thinking is True:
+            return True
+        if self.enable_thinking is False:
+            return False
+        return _supports_thinking(self.model)
+
+    def _use_responses_api(self) -> bool:
+        """本评分器是否使用 Responses API。"""
+        return _is_responses_api_endpoint(self.base_url, self.api_type)
 
     def grade_answer(self, image_path, criteria):
         criteria = self._prepare_criteria(criteria)
@@ -418,8 +552,12 @@ class OpenAICompatibleScorer(BaseScorer):
 
         headers = _build_auth_headers(self.api_key, self.base_url, self.extra_headers)
 
-        if _is_responses_api_endpoint(self.base_url):
-            # 火山引擎方舟 Responses API（/api/v3/responses）
+        use_responses_api = self._use_responses_api()
+
+        if use_responses_api:
+            # Responses API（火山引擎方舟 / 支持 responses 的网关）
+            # 注意：此处 image_url 必须是纯字符串，且必须带 detail 字段（可放在同一 content_item 上），
+            # 否则后端 pydantic 校验会报 "Input should be a valid string" / "Field required"。
             url = f"{self.base_url}/responses"
             payload = {
                 "model": self.model,
@@ -428,7 +566,11 @@ class OpenAICompatibleScorer(BaseScorer):
                         "role": "user",
                         "content": [
                             {"type": "input_text", "text": criteria},
-                            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{base64_image}"},
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "auto",
+                            },
                         ],
                     }
                 ],
@@ -452,12 +594,51 @@ class OpenAICompatibleScorer(BaseScorer):
                     }
                 ],
             }
-            if _supports_thinking(self.model):
-                payload["thinking"] = {"type": "enabled"}
-                print(f"[思考模式] 已为模型 {self.model} 启用思考模式")
+            if self._should_send_thinking():
+                style_name = _apply_thinking_param(
+                    payload, self._thinking_style_index, enabled=(self.enable_thinking is not False)
+                )
+                print(f"[思考模式] 已为模型 {self.model} 启用思考模式（参数写法：{style_name}）")
 
         try:
             resp = _request_with_retries("POST", url, headers=headers, json=payload, timeout=self.timeout)
+
+            # 自动降级：服务端不认识当前思考参数写法时，依次换下一种写法重试；
+            # 所有写法都失败才彻底放弃思考模式，避免整个阅卷流程因 400 中断。
+            styles = _THINKING_PARAM_STYLES if self.enable_thinking is not False else _THINKING_OFF_STYLES
+            guard = 0
+            while (
+                not resp.ok
+                and self._should_send_thinking()
+                and _is_unsupported_thinking_error(resp.status_code, resp.text)
+                and guard < len(styles)
+            ):
+                guard += 1
+                self._thinking_style_index += 1
+                if self._thinking_style_index >= len(styles):
+                    print(f"[思考模式] 所有参数写法均不被服务端接受，本次改用不带思考参数的模式")
+                    self._thinking_given_up = True
+                    break
+                # 清掉上一种写法的残留键
+                for stale in ("thinking", "enable_thinking", "reasoning_effort", "extra_body"):
+                    payload.pop(stale, None)
+                style_name = _apply_thinking_param(
+                    payload, self._thinking_style_index, enabled=(self.enable_thinking is not False)
+                )
+                print(f"[思考模式] 服务端 {resp.status_code} 不接受该写法，改用「{style_name}」重试")
+                resp = _request_with_retries("POST", url, headers=headers, json=payload, timeout=self.timeout)
+
+            # 最后兜底：若仍因思考参数报错，则彻底去掉参数再试一次
+            if (
+                not resp.ok
+                and _should_send_thinking_error_only(resp)
+            ):
+                for stale in ("thinking", "enable_thinking", "reasoning_effort", "extra_body"):
+                    payload.pop(stale, None)
+                self._thinking_given_up = True
+                print("[思考模式] 已关闭思考参数重试")
+                resp = _request_with_retries("POST", url, headers=headers, json=payload, timeout=self.timeout)
+
             if not resp.ok:
                 try:
                     detail = resp.json()
@@ -490,7 +671,7 @@ class OpenAICompatibleScorer(BaseScorer):
             }
             raise ConnectionError(f"API请求失败: {self.base_url} / {self.model}") from e
 
-        if _is_responses_api_endpoint(self.base_url):
+        if use_responses_api:
             # 解析 Responses API 返回格式
             result = ""
             for item in data.get("output", []):

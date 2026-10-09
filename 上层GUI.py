@@ -3,15 +3,17 @@
 """
 上层 GUI：调用 `自动阅卷系统GUI.py` 核心模块完成阅卷。
 
-界面分两个选项卡：
-- 阅卷主界面：直接选择「接口配置」与「模型」即可开始阅卷
+界面分四个选项卡（每个选项卡内的模块均可折叠）：
+- 阅卷主界面：阅卷参数、运行、AI 评分记录、运行日志
+- 接口与模型：接口配置/模型选择、多模型交叉校验
+- 评分标准：评分标准编辑、快捷优化建议
 - API 配置：维护自定义 API（名称/服务商/base_url/API Key/模型列表），保存到 config.json
 
 运行：
 python 上层GUI.py
 """
 
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -243,6 +245,10 @@ class App(tk.Tk):
         # 可折叠模块（界面优化）：name -> CollapsibleFrame，配合折叠状态持久化
         self._sections: dict[str, CollapsibleFrame] = {}
         self._ui_section_state: dict[str, bool] = {}
+        # 选项卡分组：tab_key -> [section name...]（供「全部展开/折叠」按页生效）
+        self._tab_section_names: dict[str, list[str]] = {}
+        # 可滚动页面：选项卡索引 -> Canvas
+        self._scroll_canvases: dict[int, tk.Canvas] = {}
 
         self._build_menu()
         self._build_ui()
@@ -312,30 +318,23 @@ class App(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
 
-        # ── 选项卡容器：阅卷主界面 / API 配置 ──
+        # ── 选项卡容器：阅卷主界面 / 接口与模型 / 评分标准 / API 配置 ──
         self._notebook = ttk.Notebook(self)
         self._notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
+        self._MAIN_TAB_INDEX = 0
+        self._MODEL_TAB_INDEX = 1
+        self._CRITERIA_TAB_INDEX = 2
+        self._API_TAB_INDEX = 3
+
         main_tab = ttk.Frame(self._notebook)
         self._notebook.add(main_tab, text="  阅卷主界面  ")
+        model_tab = ttk.Frame(self._notebook)
+        self._notebook.add(model_tab, text="  接口与模型  ")
+        criteria_tab = ttk.Frame(self._notebook)
+        self._notebook.add(criteria_tab, text="  评分标准  ")
         api_tab = ttk.Frame(self._notebook)
         self._notebook.add(api_tab, text="  API 配置  ")
-
-        # ── 顶部工具栏：模块折叠控制（始终可见，不随内容滚动） ──
-        toolbar = ttk.Frame(main_tab)
-        toolbar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
-        ttk.Label(toolbar, text="模块：").pack(side=tk.LEFT)
-        ttk.Button(toolbar, text="全部展开", width=9, command=self._expand_all_sections).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(toolbar, text="全部折叠", width=9, command=self._collapse_all_sections).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(toolbar, text="点击各模块标题栏可单独展开 / 收起", foreground="#777777").pack(side=tk.LEFT, padx=(10, 0))
-
-        # ── 可滚动容器（主界面） ──
-        scroll_host = ttk.Frame(main_tab)
-        scroll_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self._canvas = tk.Canvas(scroll_host, highlightthickness=0)
-        def _scroll_canvas(*args: str) -> None:
-            self._canvas.tk.call(str(self._canvas), "yview", *args)
 
         def _make_text_yview_command(text: tk.Text) -> Callable[..., None]:
             def _scroll_text(*args: str) -> None:
@@ -343,63 +342,44 @@ class App(tk.Tk):
 
             return _scroll_text
 
-        scrollbar = ttk.Scrollbar(scroll_host, orient="vertical", command=_scroll_canvas)
-        self._canvas.configure(yscrollcommand=scrollbar.set)
-        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # ── 每个选项卡：顶部固定工具栏 + 独立可滚动内容区 ──
+        self._build_section_toolbar(main_tab, "main")
+        self._build_section_toolbar(model_tab, "model")
+        self._build_section_toolbar(criteria_tab, "criteria")
+        self._build_section_toolbar(api_tab, "api")
 
-        inner = ttk.Frame(self._canvas)
-        self._canvas.create_window((0, 0), window=inner, anchor="nw")
+        main_inner = self._create_scroll_page(main_tab, self._MAIN_TAB_INDEX)
+        model_inner = self._create_scroll_page(model_tab, self._MODEL_TAB_INDEX)
+        criteria_inner = self._create_scroll_page(criteria_tab, self._CRITERIA_TAB_INDEX)
 
-        def _configure_inner(event: tk.Event) -> None:
-            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-            self._canvas.itemconfig(1, width=event.width)
-        inner.bind("<Configure>", _configure_inner)
-
-        def _configure_canvas(event: tk.Event) -> None:
-            self._canvas.itemconfig(1, width=event.width)
-
-        self._canvas.bind("<Configure>", _configure_canvas)
-
-        def _on_mousewheel(event: tk.Event) -> None:
-            # 当鼠标悬停在带滚动条的 Text 控件上时，不触发 Canvas 滚动
-            w = event.widget
-            while w is not None:
-                if isinstance(w, tk.Text):
-                    try:
-                        if w.cget("yscrollcommand") != "":
-                            return  # 该 Text 有自己的滚动条，跳过 Canvas 滚动
-                    except tk.TclError:
-                        pass
-                    break
-                w = w.master if hasattr(w, "master") else None
-            # 不在「阅卷主界面」选项卡时不滚动主界面画布
-            try:
-                if self._notebook.index(self._notebook.select()) != 0:
-                    return
-            except tk.TclError:
-                pass
-            self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
-        self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        # 鼠标滚轮：滚动当前选项卡对应的内容区
+        self._notebook.bind_all("<MouseWheel>", self._on_mousewheel_global)
 
         # ── 可折叠模块工厂（界面优化） ──
         base_bg = _theme_bg(self)
 
-        def _make_section(name: str, title: str, *, collapsed: bool = False,
-                          fill: str = tk.X, expand: bool = False) -> CollapsibleFrame:
-            sec = CollapsibleFrame(
-                inner,
-                title=title,
-                name=name,
-                collapsed=collapsed,
-                bg=base_bg,
-                on_toggle=self._on_section_toggle,
-            )
-            sec.pack(side=tk.TOP, fill=fill, expand=expand, padx=pad["padx"], pady=pad["pady"])
-            self._sections[name] = sec
-            return sec
+        def _section_factory(target_inner: tk.Widget, tab_key: str):
+            def _make_section(name: str, title: str, *, collapsed: bool = False,
+                              fill: str = tk.X, expand: bool = False) -> CollapsibleFrame:
+                sec = CollapsibleFrame(
+                    target_inner,
+                    title=title,
+                    name=name,
+                    collapsed=collapsed,
+                    bg=base_bg,
+                    on_toggle=self._on_section_toggle,
+                )
+                sec.pack(side=tk.TOP, fill=fill, expand=expand, padx=pad["padx"], pady=pad["pady"])
+                self._register_section(name, sec, tab_key)
+                return sec
 
-        sec_conn = _make_section("connection", "接口与模型（选择接口配置与模型后即可开始阅卷）")
+            return _make_section
+
+        make_main = _section_factory(main_inner, "main")
+        make_model = _section_factory(model_inner, "model")
+        make_criteria = _section_factory(criteria_inner, "criteria")
+
+        sec_conn = make_model("connection", "接口与模型（选择接口配置与模型后即可开始阅卷）")
         top = ttk.Frame(sec_conn.body)
         # Avoid passing geometry options as a positional argument to pack
         # (some type checkers treat them as the first positional `cnf` arg).
@@ -456,7 +436,7 @@ class App(tk.Tk):
         self.provider_var.trace_add("write", lambda name, index, mode: self._sync_provider_state())
         self._sync_provider_state()
 
-        sec_criteria = _make_section("criteria", "评分标准（直接粘贴你的阅卷要求 / 评分细则）")
+        sec_criteria = make_criteria("criteria", "评分标准（直接粘贴你的阅卷要求 / 评分细则）")
         _criteria_inner = ttk.Frame(sec_criteria.body)
         _criteria_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.criteria_text = tk.Text(_criteria_inner, height=8, wrap="word")
@@ -465,7 +445,7 @@ class App(tk.Tk):
         _criteria_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.criteria_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        sec_params = _make_section("params", "阅卷参数（批量模式 / 空白检测 / 准备状态）")
+        sec_params = make_main("params", "阅卷参数（批量模式 / 空白检测 / 准备状态）")
         mid = ttk.Frame(sec_params.body)
         mid.pack(fill=tk.X, padx=8, pady=8)
 
@@ -498,7 +478,7 @@ class App(tk.Tk):
         ttk.Label(mid, textvariable=self.ready_status_var).grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
 
-        sec_run = _make_section("run", "运行（开始阅卷 / 停止 / 运行选项）")
+        sec_run = make_main("run", "运行（开始阅卷 / 停止 / 运行选项）")
         runbox = sec_run.body
         self.start_btn = ttk.Button(runbox, text="开始单题阅卷", command=self._start)
         self.start_btn.grid(row=0, column=0, padx=8, pady=8, sticky="w")
@@ -530,7 +510,7 @@ class App(tk.Tk):
         ttk.Label(runbox, text="单题不提交/下一题；批量只点下一题不提交").grid(row=2, column=1, columnspan=3, padx=8, pady=(4, 8), sticky="w")
 
         # ── 多模型交叉校验 ──
-        sec_cross = _make_section(
+        sec_cross = make_model(
             "cross_check",
             "多模型交叉校验（主模型＋附加模型同题并行批改 → 分数比对 → 不一致时第三轮校验）",
         )
@@ -582,7 +562,7 @@ class App(tk.Tk):
         self._sync_crosscheck_state()
 
         # ── AI 评分记录 ──
-        sec_records = _make_section(
+        sec_records = make_main(
             "records", "AI 评分记录（双击记录查看截图与评分详情）", fill=tk.BOTH
         )
         record_frame = sec_records.body
@@ -616,7 +596,7 @@ class App(tk.Tk):
         ttk.Button(record_bar, text="清空记录", command=self._clear_score_records).pack(side=tk.RIGHT, padx=(8, 0))
 
         # ── 快捷优化建议 ──
-        sec_quick = _make_section(
+        sec_quick = make_criteria(
             "quick_optimize", "快捷优化建议（输入优化想法 → AI 分析 → 生成新评分标准）"
         )
         quick_frame = sec_quick.body
@@ -646,7 +626,7 @@ class App(tk.Tk):
         self.optimize_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── 日志 ──
-        sec_log = _make_section("log", "运行日志 / AI 返回（自动滚动）")
+        sec_log = make_main("log", "运行日志 / AI 返回（自动滚动）")
         log_frame = sec_log.body
 
         self.log_text = tk.Text(log_frame, wrap="word", height=12)
@@ -696,7 +676,7 @@ class App(tk.Tk):
             on_toggle=self._on_section_toggle,
         )
         sec_profiles.pack(fill=tk.BOTH, expand=True)
-        self._sections["api_profiles"] = sec_profiles
+        self._register_section("api_profiles", sec_profiles, "api")
         left = sec_profiles.body
 
         tree_frame = ttk.Frame(left)
@@ -729,7 +709,7 @@ class App(tk.Tk):
             on_toggle=self._on_section_toggle,
         )
         sec_policy.pack(fill=tk.X, pady=(8, 0))
-        self._sections["api_request_policy"] = sec_policy
+        self._register_section("api_request_policy", sec_policy, "api")
         policy_frame = sec_policy.body
 
         policy_grid = ttk.Frame(policy_frame)
@@ -790,7 +770,7 @@ class App(tk.Tk):
             on_toggle=self._on_section_toggle,
         )
         sec_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
-        self._sections["api_detail"] = sec_detail
+        self._register_section("api_detail", sec_detail, "api")
 
         form = ttk.Frame(sec_detail.body)
         form.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -893,15 +873,92 @@ class App(tk.Tk):
         self.ap_status_var = tk.StringVar(value="")
         ttk.Label(bottom, textvariable=self.ap_status_var, foreground="#666666").pack(side=tk.LEFT, padx=(12, 0))
 
-    # ── 可折叠模块控制 ──
+    # ── 选项卡布局 / 可折叠模块控制 ──
+
+    def _create_scroll_page(self, page: tk.Widget, index: int) -> tk.Widget:
+        """在选项卡页面内创建纵向可滚动内容区，返回内容父容器（inner）。"""
+        host = ttk.Frame(page)
+        host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(host, highlightthickness=0)
+
+        def _scroll_canvas(*args: str) -> None:
+            canvas.tk.call(str(canvas), "yview", *args)
+
+        scrollbar = ttk.Scrollbar(host, orient="vertical", command=_scroll_canvas)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _configure_inner(event: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(window_id, width=event.width)
+
+        inner.bind("<Configure>", _configure_inner)
+
+        def _configure_canvas(event: tk.Event) -> None:
+            canvas.itemconfig(window_id, width=event.width)
+
+        canvas.bind("<Configure>", _configure_canvas)
+
+        self._scroll_canvases[index] = canvas
+        return inner
+
+    def _build_section_toolbar(self, page: tk.Widget, tab_key: str):
+        """为选项卡添加固定的模块折叠工具栏（只作用于本页模块）。"""
+        bar = ttk.Frame(page)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(bar, text="模块：").pack(side=tk.LEFT)
+        ttk.Button(
+            bar, text="全部展开", width=9,
+            command=lambda k=tab_key: self._toggle_tab_sections(k, False),
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(
+            bar, text="全部折叠", width=9,
+            command=lambda k=tab_key: self._toggle_tab_sections(k, True),
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(bar, text="点击各模块标题栏可单独展开 / 收起", foreground="#777777").pack(
+            side=tk.LEFT, padx=(10, 0)
+        )
+
+    def _register_section(self, name: str, section: CollapsibleFrame, tab_key: str) -> CollapsibleFrame:
+        """登记可折叠模块，并归入所属选项卡分组。"""
+        self._sections[name] = section
+        self._tab_section_names.setdefault(tab_key, []).append(name)
+        return section
+
+    def _on_mousewheel_global(self, event: tk.Event) -> None:
+        # 当鼠标悬停在带滚动条的 Text 控件上时，不触发页面滚动
+        w = event.widget
+        while w is not None:
+            if isinstance(w, tk.Text):
+                try:
+                    if w.cget("yscrollcommand") != "":
+                        return  # 该 Text 有自己的滚动条，跳过页面滚动
+                except tk.TclError:
+                    pass
+                break
+            w = w.master if hasattr(w, "master") else None
+        try:
+            index = self._notebook.index(self._notebook.select())
+        except tk.TclError:
+            return
+        canvas = self._scroll_canvases.get(index)
+        if canvas is None:
+            return
+        canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     def _refresh_scrollregion(self):
-        """折叠/展开后刷新主界面画布的滚动区域（避免残留空白或截断）。"""
+        """折叠/展开后刷新各页面画布的滚动区域（避免残留空白或截断）。"""
         def _apply():
-            try:
-                self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-            except tk.TclError:
-                pass
+            for canvas in self._scroll_canvases.values():
+                try:
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                except tk.TclError:
+                    pass
 
         try:
             self.update_idletasks()
@@ -937,23 +994,21 @@ class App(tk.Tk):
         except OSError as e:
             print(f"[界面] 保存模块折叠状态失败：{e}")
 
-    def _set_all_sections_collapsed(self, collapsed: bool):
-        for name, sec in self._sections.items():
+    def _toggle_tab_sections(self, tab_key: str, collapsed: bool):
+        """展开 / 收起某个选项卡内的全部模块。"""
+        for name in self._tab_section_names.get(tab_key, []):
+            sec = self._sections.get(name)
+            if sec is None:
+                continue
             sec.set_collapsed(collapsed, notify=False)
             self._ui_section_state[name] = bool(collapsed)
         self._persist_ui_sections()
         self._refresh_scrollregion()
 
-    def _expand_all_sections(self):
-        self._set_all_sections_collapsed(False)
-
-    def _collapse_all_sections(self):
-        self._set_all_sections_collapsed(True)
-
     def _goto_api_tab(self):
         """切换到「API 配置」选项卡，并加载当前使用的配置。"""
         try:
-            self._notebook.select(1)
+            self._notebook.select(self._API_TAB_INDEX)
         except tk.TclError:
             pass
         self._ap_load_form(self._ap_selected_name() or self._active_profile_var.get())

@@ -7,7 +7,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -27,6 +27,7 @@ from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动截图模块 import format_tk_geometry, get_virtual_screen_geometry
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
 from modules.多模型校验模块 import MultiModelCrossChecker
+from modules.系统通知模块 import send_windows_notification
 # AutoFiller was previously imported but not used in this file; remove to avoid unused-import errors
 from modules.规则调优模块 import RuleTuner, ScoringRecord
 from modules.评分数据库模块 import ScoringDatabase
@@ -642,6 +643,26 @@ class App(tk.Tk):
         if self._region_overlay_visible:
             self.after(0, self._show_region_overlay)
 
+    def _notify(self, title: str, message: str, level: str = "info"):
+        """弹窗 + Windows 系统通知（线程安全，可从工作线程调用）。
+
+        用于三类关键事件：API 无响应、任务完成、三轮校验分数均不一致。
+        """
+        def _show_popup():
+            try:
+                if level == "warning":
+                    messagebox.showwarning(title, message, parent=self)
+                else:
+                    messagebox.showinfo(title, message, parent=self)
+            except Exception as e:
+                print(f"[通知] 弹窗显示失败：{e}")
+
+        try:
+            self.after(0, _show_popup)
+        except Exception:
+            _show_popup()
+        send_windows_notification(title, message, level=level)
+
     def _sync_filler_state(self):
         if self.system is None:
             return
@@ -1203,6 +1224,7 @@ class App(tk.Tk):
             after_capture=self._after_capture,
             blank_threshold=self._get_blank_threshold(),
             cross_checker=cross_checker,
+            on_notify=self._notify,
         )
         self._system_cfg_key = new_key
         self._sync_runtime_config_to_system()
@@ -1303,6 +1325,7 @@ class App(tk.Tk):
             arbiter_scorer=arbiter_scorer,
             tolerance=cc.get("tolerance", 0),
             round3_mode=round3_mode,
+            on_notify=self._notify,
         )
 
     def _select_region(self):

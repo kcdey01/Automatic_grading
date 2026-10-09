@@ -50,6 +50,7 @@ class AutoScoringSystem:
         after_capture=None,
         blank_threshold=15.0,
         cross_checker=None,
+        on_notify=None,
     ):
         self.screenshot_tool = ScreenshotTool(
             on_region_selected=on_region_selected,
@@ -59,6 +60,8 @@ class AutoScoringSystem:
         self.scorer = scorer if scorer is not None else ZhipuAIScorer(api_key, model)
         # 多模型交叉校验器（None 表示未启用）；启用后由它完成评分并返回最终分数
         self.cross_checker = cross_checker
+        # 通知回调（弹窗+系统通知）：由上层注入的线程安全实现，None 表示不通知
+        self.on_notify = on_notify
         self.filler = AutoFiller(root, mode=filler_mode, config=filler_config or {}, on_position_selected=on_position_selected)
         self.criteria = criteria
         self.running = False
@@ -80,6 +83,17 @@ class AutoScoringSystem:
             stat = ImageStat.Stat(img.convert("L"))
         return float(stat.stddev[0]) < threshold
 
+    def _notify(self, title: str, message: str, level: str = "info"):
+        """发送弹窗+系统通知（回调由上层注入，负责线程安全与降级）。"""
+        print(f"[通知] {title}：{message.replace(chr(10), ' ')}")
+        callback = self.on_notify
+        if callback is None:
+            return
+        try:
+            callback(title, message, level)
+        except Exception as e:
+            print(f"[通知] 发送失败：{e}")
+
     def _process_one_question(self, question_index=None):
         image = self.screenshot_tool.capture_current_question()
         qid = question_index if question_index is not None else "single"
@@ -91,7 +105,7 @@ class AutoScoringSystem:
             print(f"[空白检测] 题目 {qid} 截图接近空白（阈值 {self.blank_threshold:.1f}），直接判定 0 分，跳过 AI 评分")
             self.filler.config["batch_mode"] = self.batch_mode
             self.filler.fill_score(0)
-            return
+            return 0
 
         # 评分：启用多模型交叉校验时，由校验器并行批改并裁决最终分数
         if self.cross_checker is not None:
@@ -123,6 +137,7 @@ class AutoScoringSystem:
                 print(f"[回调错误] {e}")
         self.filler.config["batch_mode"] = self.batch_mode
         self.filler.fill_score(score)
+        return score
 
     def _handle_run_exception(self, error):
         print(f"错误：{error}")
@@ -135,13 +150,19 @@ class AutoScoringSystem:
         elif isinstance(error, (TimeoutError, ConnectionError)):
             print("[停止] API 连接异常，阅卷已终止")
             self.running = False
+            self._notify(
+                "API 无响应",
+                f"API 无响应，本轮阅卷已终止（不会误填 0 分）。\n\n错误详情：{error}",
+                level="warning",
+            )
 
     def run(self):
         if not self.batch_mode:
             try:
-                self._process_one_question()
+                score = self._process_one_question()
                 self.running = False
                 print("阅卷完成，非批量模式只执行一次")
+                self._notify("任务完成", f"单题阅卷完成，评分 {score} 分。")
             except KeyboardInterrupt:
                 self.running = False
             except Exception as e:
@@ -153,6 +174,7 @@ class AutoScoringSystem:
                 # 检查是否已达到设定份数
                 if self.total_questions > 0 and self.question_count >= self.total_questions:
                     print(f"已完成 {self.question_count} 份，达到设定数量，停止运行")
+                    self._notify("任务完成", f"批量阅卷完成，共处理 {self.question_count} 份。")
                     break
                 self._process_one_question(self.question_count + 1)
                 self.question_count += 1

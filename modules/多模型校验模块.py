@@ -14,6 +14,7 @@
 - 主模型评分失败：保持系统原有行为，把原异常抛回上层（超时/连接异常会触发停止阅卷）
 - 附加/仲裁模型失败：记录警告后降级继续；只剩主模型一个有效分数时直接采用主模型分数
 - 第三轮（重评/仲裁）失败：回退采用主模型第一轮分数，并在日志中提示人工复核
+- 第三轮结果与首轮各模型分数均不相同：通过通知回调提醒人工复核（弹窗+系统通知）
 """
 
 import time
@@ -30,13 +31,15 @@ class MultiModelCrossChecker:
     ROUND3_ARBITER = "arbiter"
 
     def __init__(self, primary_scorer, extra_scorers=None, arbiter_scorer=None,
-                 tolerance=0, round3_mode=ROUND3_AUTO):
+                 tolerance=0, round3_mode=ROUND3_AUTO, on_notify=None):
         """
         :param primary_scorer: 主模型评分器（始终参与，需实现 grade_answer / get_last_response / model）
         :param extra_scorers:  附加模型评分器列表（1~2 个）
         :param arbiter_scorer: 仲裁模型评分器（可选，第三轮独立仲裁用）
         :param tolerance:      分数容差，0 表示必须完全一致
         :param round3_mode:    "auto"（自动选择）/ "rereview"（主模型参考重评）/ "arbiter"（独立仲裁）
+        :param on_notify:      通知回调 (title, message, level)，用于「三轮分数均不一致」提醒；
+                               None 表示仅打印日志。由上层注入线程安全实现。
         """
         self.primary_scorer = primary_scorer
         self.extra_scorers = list(extra_scorers or [])
@@ -46,6 +49,7 @@ class MultiModelCrossChecker:
         except (TypeError, ValueError):
             self.tolerance = 0
         self.round3_mode = round3_mode or self.ROUND3_AUTO
+        self.on_notify = on_notify
         self.last_details = None
         self._last_adopted_response = None
 
@@ -114,6 +118,8 @@ class MultiModelCrossChecker:
                 "主模型参考重评": "参考重评",
             }.get(source, source)
             flow = f"首轮并行批改·分数不一致 → 第三轮{round3_label}"
+            # 第三轮分数与首轮所有有效分数均不同时，弹窗+系统通知提醒人工复核
+            self._maybe_alert_three_way(final_score, ok_results, round3_info)
 
         details["final_score"] = final_score
         details["final_source"] = source
@@ -232,6 +238,37 @@ class MultiModelCrossChecker:
             "source": "主模型参考重评",
         }
         return score, info, primary.get_last_response()
+
+    # ───────────────────────── 通知提醒 ─────────────────────────
+
+    def _alert(self, title, message, level="info"):
+        """发送提醒：打印日志 + 调用上层注入的通知回调（弹窗+系统通知）。"""
+        print(f"[交叉校验][提醒] {title}：{message.replace(chr(10), ' ')}")
+        callback = self.on_notify
+        if callback is None:
+            return
+        try:
+            callback(title, message, level)
+        except Exception as e:
+            print(f"[交叉校验] 通知发送失败：{e}")
+
+    def _maybe_alert_three_way(self, final_score, first_results, round3_info):
+        """第三轮校验分数与首轮所有有效分数均不同时，提醒人工复核。"""
+        scored = [r for r in first_results if r["score"] is not None]
+        if not scored:
+            return
+        if any(abs(final_score - r["score"]) <= self.tolerance for r in scored):
+            return
+        round3_label = "独立仲裁" if round3_info.get("mode") == "arbiter" else "参考重评"
+        first_summary = "、".join(f"{r['name']}（{r['model']}）{r['score']}分" for r in scored)
+        self._alert(
+            "三轮校验分数均不一致",
+            "第三轮校验结果与首轮各模型分数均不相同，建议人工复核该题。\n\n"
+            f"首轮评分：{first_summary}\n"
+            f"第三轮{round3_label}（{round3_info.get('model', '')}）：{final_score}分\n"
+            f"最终采用：{final_score}分",
+            level="warning",
+        )
 
     # ───────────────────────── 辅助方法 ─────────────────────────
 

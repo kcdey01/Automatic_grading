@@ -95,6 +95,7 @@ class AutoScoringSystem:
             print(f"[通知] 发送失败：{e}")
 
     def _process_one_question(self, question_index=None):
+        started = time.perf_counter()
         image = self.screenshot_tool.capture_current_question()
         qid = question_index if question_index is not None else "single"
         filename = str(self.capture_dir / f"question_{qid}_{int(time.time())}.jpg")
@@ -117,6 +118,10 @@ class AutoScoringSystem:
 
         print(f"评分结果：{score}分")
         if response_info:
+            # 记录本题（截图→AI 评分）实际耗时，供评分记录展示「用时」
+            elapsed = round(time.perf_counter() - started, 1)
+            if isinstance(response_info, dict):
+                response_info.setdefault("elapsed_seconds", elapsed)
             if question_index is None:
                 print(f"当前题目评分：{score}分")
             else:

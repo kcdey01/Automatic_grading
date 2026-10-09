@@ -13,7 +13,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -241,6 +241,8 @@ class App(tk.Tk):
         self._tune_preview_image_ref = None
         self._tune_preview_item = None
         self._tune_preview_last_xy = (0, 0)
+        # 本轮评分计时（用于「本次评分总用时」展示）
+        self._run_started_at: float | None = None
 
         # 可折叠模块（界面优化）：name -> CollapsibleFrame，配合折叠状态持久化
         self._sections: dict[str, CollapsibleFrame] = {}
@@ -572,13 +574,14 @@ class App(tk.Tk):
 
         tree_frame = ttk.Frame(record_top)
         tree_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        columns = ("序号", "题号", "AI分数", "模型", "交叉校验")
+        columns = ("序号", "题号", "AI分数", "用时", "模型", "交叉校验")
         self.tune_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=6)
         for col in columns:
             self.tune_tree.heading(col, text=col)
         self.tune_tree.column("序号", width=50, anchor="center")
         self.tune_tree.column("题号", width=60, anchor="center")
         self.tune_tree.column("AI分数", width=70, anchor="center")
+        self.tune_tree.column("用时", width=70, anchor="center")
         self.tune_tree.column("模型", width=170, anchor="w")
         self.tune_tree.column("交叉校验", width=110, anchor="center")
         _record_sb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tune_tree.yview)
@@ -593,6 +596,8 @@ class App(tk.Tk):
         record_bar.pack(fill=tk.X, padx=10, pady=(2, 4))
         self.tune_status_var = tk.StringVar(value="未收集评分记录")
         ttk.Label(record_bar, textvariable=self.tune_status_var).pack(side=tk.LEFT)
+        self.run_duration_var = tk.StringVar(value="本次评分总用时：—")
+        ttk.Label(record_bar, textvariable=self.run_duration_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Button(record_bar, text="清空记录", command=self._clear_score_records).pack(side=tk.RIGHT, padx=(8, 0))
 
         # ── 快捷优化建议 ──
@@ -2691,9 +2696,27 @@ class App(tk.Tk):
 
         self._sync_filler_state()
         sys_.question_count = 0
+        self._run_started_at = time.time()
+        self.run_duration_var.set("本次评分总用时：0.0s（进行中）")
         sys_.start()
         self.progress_var.set("运行中…")
         self.after(200, self._poll_progress)
+
+    def _refresh_run_duration(self, running: bool):
+        """刷新「本次评分总用时」：运行中实时显示，结束后定格最终值。"""
+        started = self._run_started_at
+        if started is None:
+            return
+        elapsed = time.time() - started
+        text = self._format_duration(elapsed)
+        var = getattr(self, "run_duration_var", None)
+        if var is None:
+            return
+        if running:
+            var.set(f"本次评分总用时：{text}（进行中）")
+        else:
+            var.set(f"本次评分总用时：{text}")
+            self._run_started_at = None
 
     def _poll_progress(self):
         sys_ = self.system
@@ -2708,12 +2731,14 @@ class App(tk.Tk):
                     self.progress_var.set(f"批量中：已处理 {sys_.question_count} 份")
             else:
                 self.progress_var.set("单题处理中…")
+            self._refresh_run_duration(running=True)
             self.after(350, self._poll_progress)
         else:
             if sys_.batch_mode:
                 self.progress_var.set(f"已停止（已处理 {sys_.question_count} 份）")
             else:
                 self.progress_var.set("已完成（单题）")
+            self._refresh_run_duration(running=False)
 
     def _stop(self):
         if self.system:
@@ -3109,6 +3134,7 @@ class App(tk.Tk):
             f"题号：{record.question_index or '—'}",
             f"主模型：{record.model or '—'}",
             f"评分时间：{record.created_at or '—'}",
+            f"评分用时：{self._format_duration(self._record_elapsed(record))}",
             f"AI 最终分数：{self._format_score(record.ai_score)} 分",
         ]
         status = getattr(record, "status", "")
@@ -3213,6 +3239,7 @@ class App(tk.Tk):
             image_path=record.image_path,
             error_reason=record.error_reason,
             cross_check=cross_check_raw,
+            elapsed_seconds=getattr(record, "elapsed_seconds", None),
         )
         self._record_db_ids[record.index] = db_id
         return db_id
@@ -3233,6 +3260,7 @@ class App(tk.Tk):
             question_index=("single" if question_index is None else str(question_index)),
             model=str(response_info.get("model") or (self.model_var.get() or "").strip()),
             created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            elapsed_seconds=response_info.get("elapsed_seconds"),
         )
         self.tuner.add_record(record)
         try:
@@ -3259,9 +3287,35 @@ class App(tk.Tk):
             record.index,
             record.question_index or "—",
             self._format_score(record.ai_score),
+            self._format_duration(self._record_elapsed(record)),
             record.model or "—",
             self._summarize_cross_check(getattr(record, "cross_check", None)),
         )
+
+    @staticmethod
+    def _record_elapsed(record):
+        """取单条记录用时（秒）：优先取记录自身用时，缺失时回退交叉校验总用时。"""
+        elapsed = getattr(record, "elapsed_seconds", None)
+        if elapsed is None:
+            cross = getattr(record, "cross_check", None)
+            if isinstance(cross, dict):
+                elapsed = cross.get("elapsed_total")
+        return elapsed
+
+    @staticmethod
+    def _format_duration(seconds):
+        """把秒数格式化为易读文本：<60s 显示「12.3s」，否则显示「1分23秒」。"""
+        if seconds is None:
+            return "—"
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            return str(seconds)
+        if value < 60:
+            return f"{value:.1f}s"
+        minutes = int(value // 60)
+        remain = value - minutes * 60
+        return f"{minutes}分{remain:.0f}秒"
 
     @staticmethod
     def _format_score(value):
@@ -3346,6 +3400,7 @@ class App(tk.Tk):
                 question_index=row.get("question_index") or "",
                 model=row.get("model") or "",
                 created_at=row.get("created_at") or "",
+                elapsed_seconds=row.get("elapsed_seconds"),
             )
         except Exception as e:
             print(f"[评分记录] 历史记录解析失败：{e}")
@@ -3406,6 +3461,9 @@ class App(tk.Tk):
         for item in self.tune_tree.get_children():
             self.tune_tree.delete(item)
         self._tune_update_status()
+        self._run_started_at = None
+        if getattr(self, "run_duration_var", None) is not None:
+            self.run_duration_var.set("本次评分总用时：—")
 
         tail = f"（已备份到 {backup_note}）" if backup_note else ""
         print(f"[评分记录] 已清空 {deleted} 条评分记录{tail}")

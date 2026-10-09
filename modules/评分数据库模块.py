@@ -32,6 +32,7 @@ class ScoringDatabase:
         "criteria",
         "ai_response",
         "cross_check",
+        "elapsed_seconds",
         "image_path",
         "created_at",
         "updated_at",
@@ -53,6 +54,7 @@ class ScoringDatabase:
         "criteria": "评分标准",
         "ai_response": "AI响应",
         "cross_check": "交叉校验",
+        "elapsed_seconds": "用时(秒)",
         "image_path": "截图路径",
         "created_at": "创建时间",
         "updated_at": "更新时间",
@@ -97,6 +99,7 @@ class ScoringDatabase:
                     criteria TEXT,
                     ai_response TEXT,
                     cross_check TEXT,
+                    elapsed_seconds REAL,
                     image_path TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -110,6 +113,8 @@ class ScoringDatabase:
                 conn.execute("ALTER TABLE scoring_records ADD COLUMN error_reason TEXT")
             if "cross_check" not in existing_columns:
                 conn.execute("ALTER TABLE scoring_records ADD COLUMN cross_check TEXT")
+            if "elapsed_seconds" not in existing_columns:
+                conn.execute("ALTER TABLE scoring_records ADD COLUMN elapsed_seconds REAL")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_scoring_records_session_record
@@ -140,6 +145,7 @@ class ScoringDatabase:
             "criteria": record.get("criteria", ""),
             "ai_response": record.get("ai_response", ""),
             "cross_check": record.get("cross_check", ""),
+            "elapsed_seconds": record.get("elapsed_seconds"),
             "image_path": record.get("image_path", ""),
             "created_at": now,
             "updated_at": now,

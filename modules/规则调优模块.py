@@ -18,7 +18,8 @@ class ScoringRecord:
     """单次评分记录"""
 
     def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None,
-                 error_reason="", cross_check="", question_index="", model="", created_at=""):
+                 error_reason="", cross_check="", question_index="", model="", created_at="",
+                 elapsed_seconds=None):
         self.index = index
         self.ai_score = ai_score
         self.ai_response = ai_response
@@ -30,6 +31,7 @@ class ScoringRecord:
         self.question_index = question_index  # 题号（"single" 表示单题）
         self.model = model  # 主模型名
         self.created_at = created_at  # 评分时间（历史记录从数据库读取）
+        self.elapsed_seconds = elapsed_seconds  # 本题评分用时（秒，None 表示未记录）
 
     @property
     def status(self):

@@ -3,11 +3,15 @@
 """
 上层 GUI：调用 `自动阅卷系统GUI.py` 核心模块完成阅卷。
 
+界面分两个选项卡：
+- 阅卷主界面：直接选择「接口配置」与「模型」即可开始阅卷
+- API 配置：维护自定义 API（名称/服务商/base_url/API Key/模型列表），保存到 config.json
+
 运行：
 python 上层GUI.py
 """
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -88,6 +92,10 @@ class App(tk.Tk):
         }
         self._provider_notice_provider: str | None = None
         self._ui_thread_guard: threading.Lock = threading.Lock()
+        # 已保存的接口配置（API 配置选项卡维护，随 config.json 持久化）
+        self._api_profiles: list[dict] = []
+        self._active_profile_var = tk.StringVar(value="")
+        self._ap_loaded_name = ""
         self._region_overlay: tk.Toplevel | None = None
         self._region_overlay_canvas: tk.Canvas | None = None
         self._region_overlay_visible = False
@@ -102,6 +110,7 @@ class App(tk.Tk):
         self._build_menu()
         self._build_ui()
         self._load_config(silent=True)
+        self._ensure_default_profile()
         self._sync_batch_state()
         self._update_ready_status()
         self._load_score_history()
@@ -165,8 +174,17 @@ class App(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
 
-        # ── 可滚动容器 ──
-        self._canvas = tk.Canvas(self, highlightthickness=0)
+        # ── 选项卡容器：阅卷主界面 / API 配置 ──
+        self._notebook = ttk.Notebook(self)
+        self._notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        main_tab = ttk.Frame(self._notebook)
+        self._notebook.add(main_tab, text="  阅卷主界面  ")
+        api_tab = ttk.Frame(self._notebook)
+        self._notebook.add(api_tab, text="  API 配置  ")
+
+        # ── 可滚动容器（主界面） ──
+        self._canvas = tk.Canvas(main_tab, highlightthickness=0)
         def _scroll_canvas(*args: str) -> None:
             self._canvas.tk.call(str(self._canvas), "yview", *args)
 
@@ -176,7 +194,7 @@ class App(tk.Tk):
 
             return _scroll_text
 
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=_scroll_canvas)
+        scrollbar = ttk.Scrollbar(main_tab, orient="vertical", command=_scroll_canvas)
         self._canvas.configure(yscrollcommand=scrollbar.set)
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -206,6 +224,12 @@ class App(tk.Tk):
                         pass
                     break
                 w = w.master if hasattr(w, "master") else None
+            # 不在「阅卷主界面」选项卡时不滚动主界面画布
+            try:
+                if self._notebook.index(self._notebook.select()) != 0:
+                    return
+            except tk.TclError:
+                pass
             self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
         self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
@@ -215,67 +239,51 @@ class App(tk.Tk):
         # Expand padding explicitly to satisfy strict type checkers.
         top.pack(side="top", fill=tk.X, padx=pad.get("padx", 0), pady=pad.get("pady", 0))
 
-        ttk.Label(top, text="服务商").grid(row=0, column=0, sticky="w")
+        # 当前生效的连接参数（由「接口配置」自动填充，在「API 配置」选项卡维护）
         self.provider_var = tk.StringVar(value="OpenAI")
-        ttk.Combobox(
-            top,
-            textvariable=self.provider_var,
-            width=14,
-            values=[
-                "OpenAI", "智谱AI", "阿里通义千问", "字节豆包",
-                "零一万物", "硅基流动", "百度千帆", "科大讯飞", "小米MiMo", "自定义"
-            ],
-            state="readonly",
-        ).grid(row=0, column=1, sticky="w", padx=(6, 0))
-
-        ttk.Label(top, text="API Key").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.api_key_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.api_key_var, width=45, show="*").grid(row=0, column=3, sticky="we", padx=(6, 0))
-
-        ttk.Label(top, text="模型").grid(row=1, column=0, sticky="w")
         self.model_var = tk.StringVar(value="gpt-4o-mini")
-        self.model_combo = ttk.Combobox(top, textvariable=self.model_var, width=25, values=[])
-        self.model_combo.grid(row=1, column=1, sticky="w", padx=(6, 0))
-        self.fetch_models_btn = ttk.Button(top, text="获取模型列表", command=self._fetch_models)
-        self.fetch_models_btn.grid(row=1, column=2, sticky="w", padx=(12, 0))
-        self.open_platform_btn = ttk.Button(top, text="打开平台", command=self._open_provider_platform)
-        self.open_platform_btn.grid(row=1, column=3, sticky="w", padx=(6, 0))
-
-        ttk.Label(top, text="base_url(OpenAI兼容)").grid(row=2, column=0, sticky="w")
         self.base_url_var = tk.StringVar(value="https://api.openai.com")
-        self.base_url_entry = ttk.Entry(top, textvariable=self.base_url_var, width=35)
-        self.base_url_entry.grid(row=2, column=1, columnspan=3, sticky="we", padx=(6, 0))
-
-        ttk.Label(top, text="额外请求头JSON(可选)").grid(row=3, column=0, sticky="w")
         self.extra_headers_var = tk.StringVar(value="")
-        self.extra_headers_entry = ttk.Entry(top, textvariable=self.extra_headers_var, width=90)
-        self.extra_headers_entry.grid(row=3, column=1, columnspan=3, sticky="we", padx=(6, 0))
-
-        ttk.Label(top, text="思考模式").grid(row=4, column=0, sticky="w")
         self.thinking_mode_var = tk.StringVar(value="自动")
-        self.thinking_mode_combo = ttk.Combobox(
-            top,
-            textvariable=self.thinking_mode_var,
-            width=18,
-            values=["自动", "关闭", "开启"],
-            state="readonly",
-        )
-        self.thinking_mode_combo.grid(row=4, column=1, sticky="w", padx=(6, 0))
-        ttk.Label(top, text="部分网关不支持 thinking 参数，报400时选「关闭」").grid(row=4, column=2, columnspan=2, sticky="w", padx=(12, 0))
-
-        ttk.Label(top, text="接口类型").grid(row=5, column=0, sticky="w")
         self.api_type_var = tk.StringVar(value="自动判断")
-        self.api_type_combo = ttk.Combobox(
+
+        # 第 0 行：接口配置（已保存的供应商/API）
+        ttk.Label(top, text="接口配置").grid(row=0, column=0, sticky="w")
+        self.profile_combo = ttk.Combobox(
             top,
-            textvariable=self.api_type_var,
-            width=18,
-            values=list(_API_TYPE_BY_LABEL.keys()),
+            textvariable=self._active_profile_var,
+            width=30,
+            values=[],
             state="readonly",
         )
-        self.api_type_combo.grid(row=5, column=1, sticky="w", padx=(6, 0))
-        ttk.Label(top, text="自动判断=按域名识别；网关只支持一种协议时手动指定").grid(row=5, column=2, columnspan=2, sticky="w", padx=(12, 0))
+        self.profile_combo.grid(row=0, column=1, columnspan=2, sticky="we", padx=(6, 0))
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_main_profile_combo)
+        ttk.Button(top, text="管理配置…", command=self._goto_api_tab).grid(row=0, column=3, sticky="w", padx=(6, 0))
 
-        top.columnconfigure(3, weight=1)
+        # 第 1 行：模型选择
+        ttk.Label(top, text="模型").grid(row=1, column=0, sticky="w")
+        self.model_combo = ttk.Combobox(top, textvariable=self.model_var, width=30, values=[])
+        self.model_combo.grid(row=1, column=1, columnspan=2, sticky="we", padx=(6, 0))
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_main_model_combo)
+        self.fetch_models_btn = ttk.Button(top, text="获取模型列表", command=self._fetch_models)
+        self.fetch_models_btn.grid(row=1, column=3, sticky="w", padx=(6, 0))
+
+        # 第 2 行：当前连接摘要
+        ttk.Label(top, text="当前连接").grid(row=2, column=0, sticky="w")
+        self.conn_summary_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.conn_summary_var, foreground="#444444", wraplength=620, justify="left").grid(
+            row=2, column=1, columnspan=3, sticky="w", padx=(6, 0)
+        )
+
+        ttk.Label(
+            top,
+            text="提示：接口、密钥与模型列表在「API 配置」选项卡中维护；主界面直接选择配置好的供应商与模型即可。",
+            foreground="#777777",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
+        top.columnconfigure(1, weight=1)
+        top.columnconfigure(2, weight=1)
 
         # trace_add callback receives (name, index, mode) -> provide explicit params for static type checkers
         self.provider_var.trace_add("write", lambda name, index, mode: self._sync_provider_state())
@@ -396,13 +404,13 @@ class App(tk.Tk):
         self._cross_slots = {}
         next_row = 0
         next_row = self._build_cross_slot(
-            cross_grid, next_row, "b", "模型B", "base_url / API Key 留空时复用主模型的连接"
+            cross_grid, next_row, "b", "模型B", "「复用主模型」= 用主模型网关；选接口配置则自动填充连接"
         )
         next_row = self._build_cross_slot(
-            cross_grid, next_row, "c", "模型C", "base_url / API Key 留空时复用主模型的连接"
+            cross_grid, next_row, "c", "模型C", "「复用主模型」= 用主模型网关；选接口配置则自动填充连接"
         )
         self._build_cross_slot(
-            cross_grid, next_row, "arbiter", "仲裁模型", "第三轮独立仲裁用；未启用且第三轮为「自动选择」时，改为「主模型参考重评」"
+            cross_grid, next_row, "arbiter", "仲裁模型", "第三轮独立仲裁；未配置且第三轮为「自动选择」时改为主模型重评"
         )
         self._sync_crosscheck_state()
 
@@ -476,6 +484,686 @@ class App(tk.Tk):
         sb = ttk.Scrollbar(log_frame, command=_make_text_yview_command(self.log_text))
         sb.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=8)
         self.log_text.configure(yscrollcommand=sb.set)
+
+        # ── API 配置选项卡 ──
+        self._build_api_tab(api_tab)
+
+    # ══════════════════════════════════════════════════════════
+    #  API 配置选项卡：配置自定义 API（供应商 / 密钥 / 模型列表）
+    # ══════════════════════════════════════════════════════════
+
+    # 使用专用 SDK / 签名接口、不走 OpenAI 兼容协议的服务商
+    _SPECIAL_PROVIDERS = ("智谱AI", "百度千帆", "科大讯飞")
+
+    PROVIDER_KEY_HINTS = {
+        "OpenAI": "标准 OpenAI 兼容接口",
+        "智谱AI": "使用官方 SDK，无需 base_url；API Key 直接填写",
+        "阿里通义千问": "DashScope 兼容模式，base_url 一般无需修改",
+        "字节豆包": "火山方舟 Ark 接口",
+        "零一万物": "Yi 开放平台",
+        "硅基流动": "SiliconFlow 平台，一个 Key 可调用多个模型",
+        "百度千帆": "API Key 填写 API_Key:Secret_Key 格式；无需 base_url",
+        "科大讯飞": "API Key 填写 appId:apiKey:apiSecret 格式；无需 base_url",
+        "小米MiMo": "API Key 为 tp-xxxxx 格式；base_url 形如 https://token-plan-cn.xiaomimimo.com/v1",
+        "自定义": "任意 OpenAI 兼容网关：填写完整 base_url（通常以 /v1 结尾）",
+    }
+
+    def _build_api_tab(self, parent):
+        """构建「API 配置」选项卡：左侧已保存配置列表，右侧配置详情表单。"""
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # ── 左侧：配置列表 ──
+        left = ttk.LabelFrame(wrap, text="已保存的接口配置")
+        left.pack(side=tk.LEFT, fill=tk.Y)
+
+        tree_frame = ttk.Frame(left)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 0))
+        self.api_profile_tree = ttk.Treeview(tree_frame, columns=("名称", "服务商"), show="headings", height=16)
+        self.api_profile_tree.heading("名称", text="名称")
+        self.api_profile_tree.heading("服务商", text="服务商")
+        self.api_profile_tree.column("名称", width=180, anchor="w")
+        self.api_profile_tree.column("服务商", width=90, anchor="center")
+        _tree_sb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.api_profile_tree.yview)
+        self.api_profile_tree.configure(yscrollcommand=_tree_sb.set)
+        _tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.api_profile_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.api_profile_tree.bind("<<TreeviewSelect>>", self._on_ap_tree_select)
+        self.api_profile_tree.tag_configure("active", background="#cfe4ff")
+
+        list_btns = ttk.Frame(left)
+        list_btns.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Button(list_btns, text="新建", width=6, command=self._ap_new_profile).pack(side=tk.LEFT)
+        ttk.Button(list_btns, text="复制", width=6, command=self._ap_duplicate_profile).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(list_btns, text="删除", width=6, command=self._ap_delete_profile).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(left, text="设为当前使用", command=self._ap_apply_active).pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        # ── 右侧：配置详情 ──
+        right = ttk.LabelFrame(wrap, text="配置详情（修改后点「保存配置」写入 config.json）")
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+
+        form = ttk.Frame(right)
+        form.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
+
+        r = 0
+        ttk.Label(form, text="配置名称").grid(row=r, column=0, sticky="w")
+        self.ap_name_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.ap_name_var).grid(row=r, column=1, columnspan=3, sticky="we", padx=(6, 0))
+        r += 1
+
+        ttk.Label(form, text="服务商").grid(row=r, column=0, sticky="w")
+        self.ap_provider_var = tk.StringVar(value="自定义")
+        self.ap_provider_combo = ttk.Combobox(
+            form,
+            textvariable=self.ap_provider_var,
+            width=16,
+            values=list(self.PROVIDER_PRESETS.keys()),
+            state="readonly",
+        )
+        self.ap_provider_combo.grid(row=r, column=1, sticky="w", padx=(6, 0))
+        self.ap_provider_combo.bind("<<ComboboxSelected>>", self._on_ap_provider_change)
+        self.ap_provider_hint_var = tk.StringVar(value="")
+        ttk.Label(form, textvariable=self.ap_provider_hint_var, foreground="#777777", wraplength=330, justify="left").grid(
+            row=r, column=2, columnspan=2, sticky="w", padx=(10, 0)
+        )
+        r += 1
+
+        ttk.Label(form, text="base_url").grid(row=r, column=0, sticky="w")
+        self.ap_base_url_var = tk.StringVar()
+        self.ap_base_url_entry = ttk.Entry(form, textvariable=self.ap_base_url_var)
+        self.ap_base_url_entry.grid(row=r, column=1, columnspan=3, sticky="we", padx=(6, 0))
+        r += 1
+
+        ttk.Label(form, text="API Key").grid(row=r, column=0, sticky="w")
+        self.ap_api_key_var = tk.StringVar()
+        self.ap_api_key_entry = ttk.Entry(form, textvariable=self.ap_api_key_var, show="*")
+        self.ap_api_key_entry.grid(row=r, column=1, columnspan=2, sticky="we", padx=(6, 0))
+        self.ap_show_key_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="显示", variable=self.ap_show_key_var, command=self._ap_toggle_key_visible).grid(
+            row=r, column=3, sticky="w", padx=(6, 0)
+        )
+        r += 1
+
+        ttk.Label(form, text="额外请求头JSON(可选)").grid(row=r, column=0, sticky="w")
+        self.ap_extra_headers_var = tk.StringVar()
+        self.ap_extra_headers_entry = ttk.Entry(form, textvariable=self.ap_extra_headers_var)
+        self.ap_extra_headers_entry.grid(row=r, column=1, columnspan=3, sticky="we", padx=(6, 0))
+        r += 1
+
+        ttk.Label(form, text="思考模式").grid(row=r, column=0, sticky="w")
+        self.ap_thinking_var = tk.StringVar(value="自动")
+        ttk.Combobox(form, textvariable=self.ap_thinking_var, width=10, values=["自动", "关闭", "开启"], state="readonly").grid(
+            row=r, column=1, sticky="w", padx=(6, 0)
+        )
+        ttk.Label(form, text="接口类型").grid(row=r, column=2, sticky="w", padx=(10, 0))
+        self.ap_api_type_var = tk.StringVar(value="自动判断")
+        ttk.Combobox(form, textvariable=self.ap_api_type_var, width=16, values=list(_API_TYPE_BY_LABEL.keys()), state="readonly").grid(
+            row=r, column=3, sticky="w", padx=(6, 0)
+        )
+        r += 1
+
+        ttk.Label(form, text="默认模型").grid(row=r, column=0, sticky="w")
+        self.ap_default_model_var = tk.StringVar()
+        self.ap_default_model_combo = ttk.Combobox(form, textvariable=self.ap_default_model_var)
+        self.ap_default_model_combo.grid(row=r, column=1, columnspan=3, sticky="we", padx=(6, 0))
+        r += 1
+
+        ttk.Label(form, text="模型列表").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 2))
+        r += 1
+
+        model_btns = ttk.Frame(form)
+        model_btns.grid(row=r, column=0, columnspan=4, sticky="we", pady=(0, 4))
+        self.ap_fetch_btn = ttk.Button(model_btns, text="获取模型列表", command=self._ap_fetch_models)
+        self.ap_fetch_btn.pack(side=tk.LEFT)
+        ttk.Button(model_btns, text="手动添加", command=self._ap_add_model).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(model_btns, text="删除选中", command=self._ap_remove_model).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(model_btns, text="清空列表", command=self._ap_clear_models).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(model_btns, text="双击设为默认", foreground="#777777").pack(side=tk.LEFT, padx=(10, 0))
+        r += 1
+
+        models_box = ttk.Frame(form)
+        models_box.grid(row=r, column=0, columnspan=4, sticky="nsew")
+        self.ap_models_listbox = tk.Listbox(models_box, height=8, activestyle="dotbox")
+        _mb_sb = ttk.Scrollbar(models_box, orient="vertical", command=self.ap_models_listbox.yview)
+        self.ap_models_listbox.configure(yscrollcommand=_mb_sb.set)
+        _mb_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.ap_models_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.ap_models_listbox.bind("<Double-1>", self._ap_set_default_model)
+        form.rowconfigure(r, weight=1)
+        r += 1
+
+        bottom = ttk.Frame(form)
+        bottom.grid(row=r, column=0, columnspan=4, sticky="we", pady=(8, 0))
+        ttk.Button(bottom, text="保存配置", command=self._ap_save_form).pack(side=tk.LEFT)
+        ttk.Button(bottom, text="保存并应用（返回主界面）", command=lambda: self._ap_apply_active(return_to_main=True)).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        self.ap_status_var = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=self.ap_status_var, foreground="#666666").pack(side=tk.LEFT, padx=(12, 0))
+
+    def _goto_api_tab(self):
+        """切换到「API 配置」选项卡，并加载当前使用的配置。"""
+        try:
+            self._notebook.select(1)
+        except tk.TclError:
+            pass
+        self._ap_load_form(self._ap_selected_name() or self._active_profile_var.get())
+
+    # ── 接口配置公共方法 ──
+
+    def _find_profile(self, name: str) -> dict | None:
+        target = (name or "").strip()
+        if not target:
+            return None
+        for profile in self._api_profiles:
+            if profile.get("name") == target:
+                return profile
+        return None
+
+    @staticmethod
+    def _normalize_profile(raw: dict) -> dict:
+        """把任意来源的配置字典标准化（补默认值、清洗非法取值）。"""
+        thinking = str(raw.get("thinking_mode") or "自动")
+        if thinking not in ("自动", "关闭", "开启"):
+            thinking = "自动"
+        api_type = str(raw.get("api_type") or "自动判断")
+        if api_type not in _API_TYPE_BY_LABEL:
+            api_type = "自动判断"
+        models: list[str] = []
+        raw_models = raw.get("models")
+        if isinstance(raw_models, (list, tuple)):
+            for item in raw_models:
+                model = str(item).strip()
+                if model and model not in models:
+                    models.append(model)
+        default_model = str(raw.get("default_model") or "").strip()
+        if default_model and default_model not in models:
+            models.insert(0, default_model)
+        return {
+            "name": str(raw.get("name") or "").strip() or "未命名配置",
+            "provider": str(raw.get("provider") or "自定义").strip() or "自定义",
+            "base_url": str(raw.get("base_url") or "").strip(),
+            "api_key": str(raw.get("api_key") or "").strip(),
+            "extra_headers_json": str(raw.get("extra_headers_json") or "").strip(),
+            "thinking_mode": thinking,
+            "api_type": api_type,
+            "models": models,
+            "default_model": default_model,
+        }
+
+    def _unique_profile_name(self, base: str) -> str:
+        names = {p["name"] for p in self._api_profiles}
+        if base not in names:
+            return base
+        index = 2
+        while f"{base} {index}" in names:
+            index += 1
+        return f"{base} {index}"
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return "未填写"
+        if len(text) <= 8:
+            return text[0] + "*" * (len(text) - 1)
+        return f"{text[:4]}****{text[-4:]}"
+
+    def _describe_connection(self) -> str:
+        provider = self.provider_var.get()
+        if provider in self._SPECIAL_PROVIDERS:
+            key_format = {
+                "智谱AI": "智谱官方 SDK",
+                "百度千帆": "API_Key:Secret_Key",
+                "科大讯飞": "appId:apiKey:apiSecret",
+            }.get(provider, "专用接口")
+            return f"{provider}（专用接口，API Key 格式：{key_format}）"
+        base_url = (self.base_url_var.get() or "").strip() or "（默认地址）"
+        return (
+            f"{provider} | {base_url} | Key {self._mask_secret(self.api_key_var.get())}"
+            f" | 接口类型 {self.api_type_var.get()} | 思考模式 {self.thinking_mode_var.get()}"
+        )
+
+    def _ensure_default_profile(self):
+        """首次运行（无配置文件）时，用当前默认连接创建一个配置，保证主界面可用。"""
+        if self._api_profiles:
+            return
+        model = (self.model_var.get() or "").strip()
+        profile = self._normalize_profile({
+            "name": f"{self.provider_var.get() or 'OpenAI'} 默认配置",
+            "provider": self.provider_var.get() or "OpenAI",
+            "base_url": self.base_url_var.get(),
+            "api_key": self.api_key_var.get(),
+            "extra_headers_json": self.extra_headers_var.get(),
+            "thinking_mode": self.thinking_mode_var.get(),
+            "api_type": self.api_type_var.get(),
+            "models": [model] if model else [],
+            "default_model": model,
+        })
+        self._api_profiles = [profile]
+        self._active_profile_var.set(profile["name"])
+        self._refresh_profile_choices()
+        if hasattr(self, "ap_status_var"):
+            self.ap_status_var.set("未找到配置文件，已创建默认接口配置")
+
+    def _apply_profile_to_vars(self, name: str) -> bool:
+        """把指定配置写入主界面当前生效的连接变量，并刷新模型下拉框。"""
+        profile = self._find_profile(name)
+        if profile is None:
+            return False
+        self._active_profile_var.set(profile["name"])
+        self.provider_var.set(profile["provider"])
+        self.api_key_var.set(profile["api_key"])
+        self.base_url_var.set(profile["base_url"])
+        self.extra_headers_var.set(profile["extra_headers_json"])
+        self.thinking_mode_var.set(profile["thinking_mode"])
+        self.api_type_var.set(profile["api_type"])
+        models = list(profile["models"])
+        if hasattr(self, "model_combo"):
+            self.model_combo.configure(values=models)
+        current = (self.model_var.get() or "").strip()
+        default_model = (profile.get("default_model") or "").strip()
+        if models and current not in models:
+            self.model_var.set(default_model if default_model in models else models[0])
+        elif not current and default_model:
+            self.model_var.set(default_model)
+        self._sync_provider_state()
+        return True
+
+    def _sync_active_profile_from_main(self):
+        """收集配置前，把主界面当前模型回写到当前配置（保持默认模型最新）。"""
+        profile = self._find_profile(self._active_profile_var.get())
+        if profile is None:
+            return
+        model = (self.model_var.get() or "").strip()
+        if model:
+            profile["default_model"] = model
+            if model not in profile["models"]:
+                profile["models"].append(model)
+
+    @staticmethod
+    def _legacy_profile_from_cfg(cfg: dict) -> dict:
+        """旧版 config.json（无 api_profiles）→ 合成一个接口配置，保证向后兼容。"""
+        provider = str(cfg.get("provider") or "OpenAI")
+        model = str(cfg.get("model") or "").strip()
+        return {
+            "name": f"{provider}（默认）",
+            "provider": provider,
+            "base_url": cfg.get("base_url"),
+            "api_key": cfg.get("api_key"),
+            "extra_headers_json": cfg.get("extra_headers_json"),
+            "thinking_mode": cfg.get("thinking_mode"),
+            "api_type": cfg.get("api_type"),
+            "models": [model] if model else [],
+            "default_model": model,
+        }
+
+    def _match_profile_by_connection(self, cfg: dict) -> str:
+        """按 provider/base_url/api_key 匹配已有配置，用于恢复 active_profile。"""
+        provider = str(cfg.get("provider") or "")
+        base_url = str(cfg.get("base_url") or "").strip()
+        api_key = str(cfg.get("api_key") or "").strip()
+        for profile in self._api_profiles:
+            if profile["provider"] != provider:
+                continue
+            if base_url and profile["base_url"] and profile["base_url"] != base_url:
+                continue
+            if api_key and profile["api_key"] and profile["api_key"] != api_key:
+                continue
+            return profile["name"]
+        return ""
+
+    def _refresh_profile_choices(self):
+        """配置列表变化后，同步主界面下拉框与交叉校验槽位的候选项。"""
+        names = [p["name"] for p in self._api_profiles]
+        if hasattr(self, "profile_combo"):
+            self.profile_combo.configure(values=names)
+        if self._active_profile_var.get() not in names:
+            self._active_profile_var.set(names[0] if names else "")
+        self._refresh_cross_profile_choices()
+        self._ap_refresh_tree()
+
+    def _on_main_profile_combo(self, event=None):
+        name = self._active_profile_var.get()
+        if not self._apply_profile_to_vars(name):
+            return
+        self._refresh_cross_profile_choices()
+        print(f"[配置] 已切换到接口配置「{name}」（{self.provider_var.get()} / {self.model_var.get() or '未选择模型'}）")
+
+    def _on_main_model_combo(self, event=None):
+        model = (self.model_var.get() or "").strip()
+        if model:
+            print(f"[配置] 当前模型：{model}")
+
+    # ── API 配置选项卡：列表操作 ──
+
+    def _ap_refresh_tree(self):
+        tree = getattr(self, "api_profile_tree", None)
+        if tree is None:
+            return
+        selected = self._ap_selected_name()
+        children = tree.get_children()
+        if children:
+            tree.delete(*children)
+        active = self._active_profile_var.get()
+        for profile in self._api_profiles:
+            tags = ("active",) if profile["name"] == active else ()
+            tree.insert("", "end", iid=profile["name"], values=(profile["name"], profile["provider"]), tags=tags)
+        target = selected if selected and tree.exists(selected) else active
+        if target and tree.exists(target):
+            tree.selection_set(target)
+            tree.see(target)
+
+    def _ap_selected_name(self) -> str:
+        tree = getattr(self, "api_profile_tree", None)
+        if tree is None:
+            return ""
+        selection = tree.selection()
+        if not selection:
+            return ""
+        return str(selection[0])
+
+    def _on_ap_tree_select(self, event=None):
+        name = self._ap_selected_name()
+        # 仅在选中项变化时重新载入，避免重复选中把用户未保存的修改冲掉
+        if name and name != getattr(self, "_ap_loaded_name", ""):
+            self._ap_load_form(name)
+
+    def _ap_load_form(self, name: str):
+        profile = self._find_profile(name)
+        if profile is None:
+            return
+        self._ap_loaded_name = profile["name"]
+        self.ap_name_var.set(profile["name"])
+        self.ap_provider_var.set(profile["provider"])
+        self.ap_base_url_var.set(profile["base_url"])
+        self.ap_api_key_var.set(profile["api_key"])
+        self.ap_extra_headers_var.set(profile["extra_headers_json"])
+        self.ap_thinking_var.set(profile["thinking_mode"])
+        self.ap_api_type_var.set(profile["api_type"])
+        self.ap_default_model_var.set(profile["default_model"])
+        self.ap_models_listbox.delete(0, "end")
+        for model in profile["models"]:
+            self.ap_models_listbox.insert("end", model)
+        self.ap_default_model_combo.configure(values=list(profile["models"]))
+        self._on_ap_provider_change(silent=True)
+        suffix = "（当前使用中）" if profile["name"] == self._active_profile_var.get() else ""
+        self.ap_status_var.set(f"已加载「{profile['name']}」{suffix}")
+
+    def _ap_new_profile(self):
+        name = self._unique_profile_name("新配置")
+        profile = self._normalize_profile({"name": name, "provider": "自定义"})
+        self._api_profiles.append(profile)
+        self._refresh_profile_choices()
+        tree = self.api_profile_tree
+        if tree.exists(name):
+            tree.selection_set(name)
+            tree.see(name)
+        self._ap_load_form(name)
+        self.ap_status_var.set("已创建新配置：填写 base_url / API Key 后点「保存配置」")
+
+    def _ap_duplicate_profile(self):
+        profile = self._find_profile(self._ap_selected_name())
+        if profile is None:
+            messagebox.showinfo("提示", "请先在左侧列表中选择一个配置。")
+            return
+        clone = dict(profile)
+        clone["models"] = list(profile["models"])
+        clone["name"] = self._unique_profile_name(f"{profile['name']} 副本")
+        self._api_profiles.append(clone)
+        self._refresh_profile_choices()
+        tree = self.api_profile_tree
+        if tree.exists(clone["name"]):
+            tree.selection_set(clone["name"])
+            tree.see(clone["name"])
+        self._ap_load_form(clone["name"])
+        self.ap_status_var.set(f"已复制为「{clone['name']}」")
+
+    def _ap_delete_profile(self):
+        name = self._ap_selected_name() or (self.ap_name_var.get() or "").strip()
+        profile = self._find_profile(name)
+        if profile is None:
+            messagebox.showinfo("提示", "请先在左侧列表中选择一个配置。")
+            return
+        if len(self._api_profiles) <= 1:
+            messagebox.showinfo("提示", "至少需要保留一个接口配置。")
+            return
+        if not messagebox.askyesno("删除配置", f"确定删除接口配置「{name}」吗？\n（不影响评分记录与截图文件）"):
+            return
+        was_active = (self._active_profile_var.get() == name)
+        self._api_profiles = [p for p in self._api_profiles if p["name"] != name]
+        if was_active and self._api_profiles:
+            self._apply_profile_to_vars(self._api_profiles[0]["name"])
+        self._refresh_profile_choices()
+        self._save_config(silent=True)
+        self._ap_load_form(self._active_profile_var.get())
+        self.ap_status_var.set(f"已删除「{name}」")
+        print(f"[API 配置] 已删除配置「{name}」")
+
+    # ── API 配置选项卡：表单操作 ──
+
+    def _ap_toggle_key_visible(self):
+        self.ap_api_key_entry.configure(show=("" if self.ap_show_key_var.get() else "*"))
+
+    def _on_ap_provider_change(self, event=None, silent: bool = False):
+        provider = self.ap_provider_var.get()
+        self.ap_provider_hint_var.set(self.PROVIDER_KEY_HINTS.get(provider, ""))
+        special = provider in self._SPECIAL_PROVIDERS
+        for widget in (self.ap_base_url_entry, self.ap_extra_headers_entry):
+            widget.configure(state=("disabled" if special else "normal"))
+        self.ap_fetch_btn.configure(state=("disabled" if special else "normal"))
+        if silent:
+            return
+        preset = self.PROVIDER_PRESETS.get(provider)
+        if preset:
+            preset_url, preset_model = preset
+            if preset_url and not (self.ap_base_url_var.get() or "").strip():
+                self.ap_base_url_var.set(preset_url)
+            if not (self.ap_default_model_var.get() or "").strip() and preset_model:
+                self.ap_default_model_var.set(preset_model)
+
+    def _ap_collect_form(self) -> dict | None:
+        """读取表单并校验；返回标准化配置 dict，校验失败返回 None。"""
+        name = (self.ap_name_var.get() or "").strip()
+        if not name:
+            messagebox.showerror("配置不完整", "请填写配置名称（用于在主界面下拉框中选择）")
+            return None
+        provider = self.ap_provider_var.get()
+        extra_headers = (self.ap_extra_headers_var.get() or "").strip()
+        if extra_headers:
+            try:
+                parsed = json.loads(extra_headers)
+                if not isinstance(parsed, dict):
+                    raise ValueError("额外请求头必须是 JSON 对象")
+            except Exception as e:
+                messagebox.showerror("配置错误", f"额外请求头JSON解析失败：{e}")
+                return None
+        if provider not in self._SPECIAL_PROVIDERS and not (self.ap_base_url_var.get() or "").strip():
+            messagebox.showerror("配置不完整", "请填写 base_url（OpenAI 兼容接口地址）")
+            return None
+        models = [str(m).strip() for m in self.ap_models_listbox.get(0, "end")]
+        models = [m for m in models if m]
+        default_model = (self.ap_default_model_var.get() or "").strip()
+        if not default_model and models:
+            default_model = models[0]
+            self.ap_default_model_var.set(default_model)
+        if default_model and default_model not in models:
+            models.insert(0, default_model)
+        return self._normalize_profile({
+            "name": name,
+            "provider": provider,
+            "base_url": self.ap_base_url_var.get(),
+            "api_key": self.ap_api_key_var.get(),
+            "extra_headers_json": extra_headers,
+            "thinking_mode": self.ap_thinking_var.get(),
+            "api_type": self.ap_api_type_var.get(),
+            "models": models,
+            "default_model": default_model,
+        })
+
+    def _ap_save_form(self, silent: bool = False) -> bool:
+        old_name = self._ap_selected_name()
+        new_profile = self._ap_collect_form()
+        if new_profile is None:
+            return False
+        new_name = new_profile["name"]
+        for profile in self._api_profiles:
+            if profile["name"] == new_name and profile["name"] != old_name:
+                messagebox.showerror("名称重复", f"已存在名为「{new_name}」的配置，请换一个名称。")
+                return False
+
+        target = self._find_profile(old_name) or self._find_profile(new_name)
+        if target is None:
+            self._api_profiles.append(new_profile)
+        else:
+            target.clear()
+            target.update(new_profile)
+
+        if self._active_profile_var.get() in (old_name, new_name):
+            self._apply_profile_to_vars(new_name)
+        self._refresh_profile_choices()
+        self._ap_loaded_name = new_name
+        tree = self.api_profile_tree
+        if tree.exists(new_name):
+            tree.selection_set(new_name)
+            tree.see(new_name)
+        self._save_config(silent=True)
+        self.ap_status_var.set(f"已保存「{new_name}」")
+        print(f"[API 配置] 已保存配置「{new_name}」（{new_profile['provider']}，{len(new_profile['models'])} 个模型）")
+        if not silent:
+            messagebox.showinfo("保存成功", f"接口配置「{new_name}」已保存。\n可在主界面「接口配置」下拉框中选择使用。")
+        return True
+
+    def _ap_apply_active(self, return_to_main: bool = False):
+        """保存表单并设为当前使用；可选切回主界面。"""
+        if not self._ap_save_form(silent=True):
+            return
+        name = (self.ap_name_var.get() or "").strip()
+        if not self._apply_profile_to_vars(name):
+            messagebox.showinfo("提示", "配置尚未保存，请先点「保存配置」。")
+            return
+        self._refresh_profile_choices()
+        self._save_config(silent=True)  # 立即记录「当前使用」的配置，重启后保持
+        self.ap_status_var.set(f"当前使用：{name}")
+        print(f"[API 配置] 当前使用配置已切换为「{name}」")
+        if return_to_main:
+            try:
+                self._notebook.select(0)
+            except tk.TclError:
+                pass
+            self._update_ready_status()
+
+    def _ap_fetch_models(self):
+        provider = self.ap_provider_var.get()
+        if provider in self._SPECIAL_PROVIDERS:
+            messagebox.showinfo("提示", f"{provider} 当前使用专用 SDK/接口，暂不支持自动获取模型列表，请用「手动添加」。")
+            return
+        base_url = (self.ap_base_url_var.get() or "").strip()
+        if not base_url:
+            messagebox.showerror("配置不完整", "请先填写 base_url")
+            return
+        api_key = (self.ap_api_key_var.get() or "").strip()
+        if not api_key:
+            messagebox.showerror("配置不完整", "请先填写 API Key")
+            return
+        extra_headers_raw = (self.ap_extra_headers_var.get() or "").strip()
+        extra_headers: dict[str, str] = {}
+        if extra_headers_raw:
+            try:
+                parsed_headers: Any = json.loads(extra_headers_raw)
+                if not isinstance(parsed_headers, dict):
+                    raise ValueError("额外请求头必须是 JSON 对象")
+                if not all(isinstance(k, str) and isinstance(v, str) for k, v in parsed_headers.items()):
+                    raise ValueError("额外请求头的键和值都必须是字符串")
+                extra_headers = parsed_headers
+            except Exception as e:
+                messagebox.showerror("配置错误", f"额外请求头JSON解析失败：{e}")
+                return
+
+        self.ap_fetch_btn.configure(state="disabled", text="获取中…")
+        print(f"[API 配置] 正在获取模型列表：{base_url}")
+
+        def _do_fetch():
+            try:
+                models = fetch_openai_compatible_models(
+                    base_url=base_url,
+                    api_key=api_key,
+                    extra_headers=extra_headers,
+                    timeout=30,
+                )
+                self.after(0, self._ap_fetch_done, models)
+            except Exception as e:
+                self.after(0, self._ap_fetch_error, str(e))
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _ap_fetch_done(self, models: list[str]):
+        self.ap_fetch_btn.configure(state="normal", text="获取模型列表")
+        if not models:
+            messagebox.showwarning("模型列表", "接口返回成功，但没有解析到模型 id。")
+            return
+        self.ap_models_listbox.delete(0, "end")
+        for model in models:
+            self.ap_models_listbox.insert("end", model)
+        self.ap_default_model_combo.configure(values=models)
+        if not (self.ap_default_model_var.get() or "").strip():
+            self.ap_default_model_var.set(models[0])
+        self.ap_status_var.set(f"已获取 {len(models)} 个模型，点「保存配置」写入")
+        print(f"[API 配置] 已获取 {len(models)} 个模型")
+        messagebox.showinfo("模型列表", f"已获取 {len(models)} 个模型，已填入模型列表。\n点「保存配置」后即可在主界面选择。")
+
+    def _ap_fetch_error(self, err: str):
+        self.ap_fetch_btn.configure(state="normal", text="获取模型列表")
+        print(f"[API 配置] 获取模型列表失败：{err}")
+        messagebox.showerror("获取模型列表失败", err)
+
+    def _ap_add_model(self):
+        from tkinter import simpledialog
+        value = simpledialog.askstring("添加模型", "输入模型名（如 grok-4.5）：", parent=self)
+        if not value:
+            return
+        model = value.strip()
+        if not model:
+            return
+        existing = [str(m) for m in self.ap_models_listbox.get(0, "end")]
+        if model in existing:
+            messagebox.showinfo("提示", f"模型「{model}」已在列表中。")
+            return
+        self.ap_models_listbox.insert("end", model)
+        self.ap_default_model_combo.configure(values=list(self.ap_models_listbox.get(0, "end")))
+        if not (self.ap_default_model_var.get() or "").strip():
+            self.ap_default_model_var.set(model)
+
+    def _ap_remove_model(self):
+        selection = self.ap_models_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("提示", "请先在模型列表中选择要删除的模型。")
+            return
+        for index in reversed(selection):
+            self.ap_models_listbox.delete(index)
+        models = [str(m) for m in self.ap_models_listbox.get(0, "end")]
+        self.ap_default_model_combo.configure(values=models)
+        if (self.ap_default_model_var.get() or "").strip() not in models:
+            self.ap_default_model_var.set(models[0] if models else "")
+
+    def _ap_clear_models(self):
+        if not self.ap_models_listbox.size():
+            return
+        if not messagebox.askyesno("清空模型列表", "确定清空当前配置的模型列表吗？（点「保存配置」后生效）"):
+            return
+        self.ap_models_listbox.delete(0, "end")
+        self.ap_default_model_combo.configure(values=[])
+        self.ap_default_model_var.set("")
+
+    def _ap_set_default_model(self, event=None):
+        selection = self.ap_models_listbox.curselection()
+        if not selection:
+            return
+        model = self.ap_models_listbox.get(selection[0])
+        self.ap_default_model_var.set(model)
+        self.ap_status_var.set(f"默认模型：{model}（点「保存配置」生效）")
 
     def _sync_batch_state(self):
         self.total_entry.configure(state=("normal" if self.batch_var.get() else "disabled"))
@@ -666,9 +1354,14 @@ class App(tk.Tk):
     }
 
     def _build_cross_slot(self, parent, row, key, label, hint):
-        """构建一个交叉校验模型配置槽位（启用开关 + 模型名/base_url/API Key + 思考模式/接口类型）。"""
+        """构建一个交叉校验模型配置槽位。
+
+        可直接从已保存的接口配置中选择（自动填充 base_url / API Key / 模型列表），
+        也可选「复用主模型」使用主模型的网关连接；下方输入框仍可手动微调。
+        """
         slot = {
             "enabled": tk.BooleanVar(value=False),
+            "profile": tk.StringVar(value=self._CROSS_REUSE_LABEL),
             "model": tk.StringVar(),
             "base_url": tk.StringVar(),
             "api_key": tk.StringVar(),
@@ -682,39 +1375,110 @@ class App(tk.Tk):
             line1, text=label, variable=slot["enabled"], command=self._sync_crosscheck_state
         )
         slot["check"].pack(side=tk.LEFT)
-        ttk.Label(line1, text="模型名").pack(side=tk.LEFT, padx=(10, 0))
-        entry_model = ttk.Entry(line1, textvariable=slot["model"], width=16)
-        entry_model.pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(line1, text="base_url").pack(side=tk.LEFT, padx=(10, 0))
-        entry_url = ttk.Entry(line1, textvariable=slot["base_url"], width=30)
-        entry_url.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
-        ttk.Label(line1, text="API Key").pack(side=tk.LEFT, padx=(10, 0))
-        entry_key = ttk.Entry(line1, textvariable=slot["api_key"], width=18, show="*")
-        entry_key.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(line1, text="接口配置").pack(side=tk.LEFT, padx=(10, 0))
+        combo_profile = ttk.Combobox(
+            line1,
+            textvariable=slot["profile"],
+            width=20,
+            values=self._cross_profile_choices(),
+            state="readonly",
+        )
+        combo_profile.pack(side=tk.LEFT, padx=(4, 0))
+        combo_profile.bind("<<ComboboxSelected>>", lambda event, k=key: self._on_cross_profile_change(k))
+        ttk.Label(line1, text="模型").pack(side=tk.LEFT, padx=(10, 0))
+        combo_model = ttk.Combobox(line1, textvariable=slot["model"], width=24, values=[])
+        combo_model.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
         line2 = ttk.Frame(parent)
-        line2.grid(row=row + 1, column=0, sticky="we", pady=(0, 2))
-        ttk.Label(line2, text="思考模式").pack(side=tk.LEFT, padx=(28, 0))
+        line2.grid(row=row + 1, column=0, sticky="we")
+        ttk.Label(line2, text="base_url").pack(side=tk.LEFT, padx=(28, 0))
+        entry_url = ttk.Entry(line2, textvariable=slot["base_url"])
+        entry_url.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+        ttk.Label(line2, text="API Key").pack(side=tk.LEFT, padx=(10, 0))
+        entry_key = ttk.Entry(line2, textvariable=slot["api_key"], width=18, show="*")
+        entry_key.pack(side=tk.LEFT, padx=(4, 0))
+
+        line3 = ttk.Frame(parent)
+        line3.grid(row=row + 2, column=0, sticky="we", pady=(0, 2))
+        ttk.Label(line3, text="思考模式").pack(side=tk.LEFT, padx=(28, 0))
         combo_think = ttk.Combobox(
-            line2, textvariable=slot["thinking"], width=8, values=["自动", "关闭", "开启"], state="readonly"
+            line3, textvariable=slot["thinking"], width=8, values=["自动", "关闭", "开启"], state="readonly"
         )
         combo_think.pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(line2, text="接口类型").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(line3, text="接口类型").pack(side=tk.LEFT, padx=(10, 0))
         combo_api = ttk.Combobox(
-            line2, textvariable=slot["api_type"], width=15, values=list(_API_TYPE_BY_LABEL.keys()), state="readonly"
+            line3, textvariable=slot["api_type"], width=15, values=list(_API_TYPE_BY_LABEL.keys()), state="readonly"
         )
         combo_api.pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(line2, text=hint).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(line3, text=hint).pack(side=tk.LEFT, padx=(12, 0))
 
+        slot["profile_combo"] = combo_profile
+        slot["combo_model"] = combo_model
         slot["fields"] = [
-            (entry_model, "normal"),
+            (combo_profile, "readonly"),
+            (combo_model, "normal"),
             (entry_url, "normal"),
             (entry_key, "normal"),
             (combo_think, "readonly"),
             (combo_api, "readonly"),
         ]
         self._cross_slots[key] = slot
-        return row + 2
+        return row + 3
+
+    # 交叉校验槽位中「复用主模型连接」的显示文本
+    _CROSS_REUSE_LABEL = "复用主模型"
+
+    def _cross_profile_choices(self) -> list[str]:
+        names = [p["name"] for p in getattr(self, "_api_profiles", [])]
+        return [self._CROSS_REUSE_LABEL] + names
+
+    def _on_cross_profile_change(self, key):
+        """槽位选择接口配置后，自动填充 base_url / API Key，并刷新模型候选列表。"""
+        slot = getattr(self, "_cross_slots", {}).get(key)
+        if slot is None:
+            return
+        name = slot["profile"].get()
+        if name == self._CROSS_REUSE_LABEL:
+            slot["base_url"].set("")
+            slot["api_key"].set("")
+            profile = self._find_profile(self._active_profile_var.get())
+            models = list(profile["models"]) if profile else []
+            if not (slot["model"].get() or "").strip() and models:
+                slot["model"].set((profile.get("default_model") or "").strip() or models[0])
+        else:
+            profile = self._find_profile(name)
+            if profile is None:
+                slot["profile"].set(self._CROSS_REUSE_LABEL)
+                self._on_cross_profile_change(key)
+                return
+            slot["base_url"].set(profile["base_url"])
+            slot["api_key"].set(profile["api_key"])
+            models = list(profile["models"])
+            default_model = (profile.get("default_model") or "").strip()
+            if default_model:
+                slot["model"].set(default_model)
+            elif not (slot["model"].get() or "").strip() and models:
+                slot["model"].set(models[0])
+            if profile["provider"] in self._SPECIAL_PROVIDERS:
+                print(
+                    f"[交叉校验] 注意：配置「{name}」为 {profile['provider']} 专用接口，"
+                    "交叉校验仅支持 OpenAI 兼容接口，请改选兼容网关配置或使用「复用主模型」"
+                )
+        slot["combo_model"].configure(values=models)
+
+    def _refresh_cross_profile_choices(self):
+        """接口配置列表变化后，同步各交叉校验槽位的候选项。"""
+        choices = self._cross_profile_choices()
+        for key, slot in getattr(self, "_cross_slots", {}).items():
+            try:
+                slot["profile_combo"].configure(values=choices)
+            except tk.TclError:
+                continue
+            name = slot["profile"].get()
+            if name != self._CROSS_REUSE_LABEL and name not in choices:
+                slot["profile"].set(self._CROSS_REUSE_LABEL)
+            if slot["profile"].get() == self._CROSS_REUSE_LABEL:
+                self._on_cross_profile_change(key)
 
     def _sync_crosscheck_state(self):
         """根据总开关与各槽位开关，联动启用/禁用交叉校验的所有输入控件。"""
@@ -742,6 +1506,7 @@ class App(tk.Tk):
         for key, slot in getattr(self, "_cross_slots", {}).items():
             cfg[key] = {
                 "enabled": bool(slot["enabled"].get()),
+                "profile": slot["profile"].get(),
                 "model": slot["model"].get().strip(),
                 "base_url": slot["base_url"].get().strip(),
                 "api_key": slot["api_key"].get().strip(),
@@ -752,13 +1517,13 @@ class App(tk.Tk):
 
     def _fetch_models(self):
         provider = self.provider_var.get()
-        if provider in {"智谱AI", "百度千帆", "科大讯飞"}:
+        if provider in self._SPECIAL_PROVIDERS:
             messagebox.showinfo("提示", f"{provider} 当前使用专用 SDK/接口，暂不支持自动获取模型列表。")
             return
 
         api_key = (self.api_key_var.get() or "").strip()
         if not api_key:
-            messagebox.showerror("配置不完整", "请先填写 API Key")
+            messagebox.showerror("配置不完整", "请先在「API 配置」选项卡中为当前接口配置填写 API Key")
             return
 
         base_url = (self.base_url_var.get() or "").strip()
@@ -808,10 +1573,21 @@ class App(tk.Tk):
             return
         current = (self.model_var.get() or "").strip()
         self.model_combo.configure(values=models)
+        profile = self._find_profile(self._active_profile_var.get())
         if current not in models:
             self.model_var.set(models[0])
-        print(f"[模型列表] 已获取 {len(models)} 个模型")
-        messagebox.showinfo("模型列表", f"已获取 {len(models)} 个模型，已填入模型下拉框。")
+        if profile is not None:
+            # 模型列表写回当前接口配置并持久化，下次启动可直接选择
+            profile["models"] = list(models)
+            profile["default_model"] = (self.model_var.get() or "").strip() or models[0]
+            self._save_config(silent=True)
+            self._refresh_profile_choices()
+            self._ap_refresh_tree()
+        print(f"[模型列表] 已获取 {len(models)} 个模型，已保存到当前接口配置")
+        messagebox.showinfo(
+            "模型列表",
+            f"已获取 {len(models)} 个模型，已填入模型下拉框并保存到当前接口配置。",
+        )
 
     def _fetch_models_error(self, err: str):
         self.fetch_models_btn.configure(state="normal", text="获取模型列表")
@@ -853,38 +1629,31 @@ class App(tk.Tk):
         webbrowser.open(url)
 
     def _sync_provider_state(self):
+        """连接参数变化后刷新主界面摘要（连接详情在「API 配置」选项卡维护）。"""
         provider = self.provider_var.get()
+        if hasattr(self, "conn_summary_var"):
+            self.conn_summary_var.set(self._describe_connection())
+
+        # 仅在参数为空时用预设兜底（正常流程由接口配置提供完整参数）
         preset = self.PROVIDER_PRESETS.get(provider)
         if preset:
             preset_url, preset_model = preset
-            if provider != "自定义":
+            if preset_url and not (self.base_url_var.get() or "").strip():
                 self.base_url_var.set(preset_url)
-            if self.model_var.get().strip() in {"gpt-4o", "gpt-4o-mini", "glm-4v", "qwen-vl-max", "yi-vision", "spark-v4.0", "ernie-4.0-8k", "doubao-vision-pro-32k", "mimo-v2.5-pro", "doubao-seed-1-8-251228", ""}:
+                if hasattr(self, "conn_summary_var"):
+                    self.conn_summary_var.set(self._describe_connection())
+            if not (self.model_var.get() or "").strip() and preset_model:
                 self.model_var.set(preset_model)
 
-        if provider == "智谱AI":
-            self.base_url_entry.configure(state="disabled")
-            self.extra_headers_entry.configure(state="disabled")
-        elif provider == "百度千帆":
-            self.base_url_entry.configure(state="disabled")
-            self.extra_headers_entry.configure(state="disabled")
-            print("百度千帆：API Key 请填写 API_Key:Secret_Key 格式")
-        elif provider == "科大讯飞":
-            self.base_url_entry.configure(state="disabled")
-            self.extra_headers_entry.configure(state="disabled")
-            print("科大讯飞：API Key 请填写 appId:apiKey:apiSecret 格式")
-        elif provider == "小米MiMo":
-            self.base_url_entry.configure(state="normal")
-            self.extra_headers_entry.configure(state="disabled")
-            if self._provider_notice_provider != provider:
-                print("小米MiMo：API Key 格式为 tp-xxxxx（Token Plan），请在订阅管理页面获取")
-                self._provider_notice_provider = provider
-        elif provider == "自定义":
-            self.base_url_entry.configure(state="normal")
-            self.extra_headers_entry.configure(state="normal")
-        else:
-            self.base_url_entry.configure(state="normal")
-            self.extra_headers_entry.configure(state="normal")
+        if provider in self._SPECIAL_PROVIDERS and self._provider_notice_provider != provider:
+            key_format = {
+                "智谱AI": "API Key 直接填写（智谱官方 SDK）",
+                "百度千帆": "API Key 请填写 API_Key:Secret_Key 格式",
+                "科大讯飞": "API Key 请填写 appId:apiKey:apiSecret 格式",
+            }.get(provider, "")
+            if key_format:
+                print(f"{provider}：{key_format}")
+            self._provider_notice_provider = provider
 
     def _resolve_api_type(self) -> str:
         """把界面上的「接口类型」下拉框取值翻译成内部常量。
@@ -911,6 +1680,8 @@ class App(tk.Tk):
         return None
 
     def _collect_config(self) -> dict:
+        # 保存前把主界面当前模型回写到当前接口配置
+        self._sync_active_profile_from_main()
         cfg = {
             "provider": self.provider_var.get(),
             "api_key": self.api_key_var.get(),
@@ -919,6 +1690,8 @@ class App(tk.Tk):
             "extra_headers_json": self.extra_headers_var.get(),
             "thinking_mode": self.thinking_mode_var.get(),
             "api_type": self.api_type_var.get(),
+            "api_profiles": [dict(p) for p in self._api_profiles],
+            "active_profile": self._active_profile_var.get(),
             "criteria": self.criteria_text.get("1.0", "end").strip(),
             "batch_mode": bool(self.batch_var.get()),
             "total_questions": self.total_var.get(),
@@ -1024,6 +1797,32 @@ class App(tk.Tk):
             if label in _API_TYPE_BY_LABEL:
                 self.api_type_var.set(label)
 
+        # ── 接口配置（API 配置选项卡）：加载配置列表并恢复当前选择 ──
+        profiles: list[dict] = []
+        raw_profiles = cfg.get("api_profiles")
+        if isinstance(raw_profiles, list):
+            seen_names: set[str] = set()
+            for item in raw_profiles:
+                if not isinstance(item, dict):
+                    continue
+                profile = self._normalize_profile(item)
+                if profile["name"] in seen_names:
+                    continue
+                seen_names.add(profile["name"])
+                profiles.append(profile)
+        if not profiles:
+            # 旧版配置（无 api_profiles）：从顶层连接字段合成一个配置
+            profiles = [self._normalize_profile(self._legacy_profile_from_cfg(cfg))]
+        self._api_profiles = profiles
+        active_name = str(cfg.get("active_profile") or "")
+        if active_name not in [p["name"] for p in profiles]:
+            active_name = self._match_profile_by_connection(cfg) or profiles[0]["name"]
+        self._apply_profile_to_vars(active_name)
+        if cfg.get("model"):
+            # 顶层 model 优先（保持旧配置文件的“当前模型”语义）
+            self.model_var.set(str(cfg["model"]))
+        self._refresh_profile_choices()
+
         if "criteria" in cfg:
             self.criteria_text.delete("1.0", "end")
             self.criteria_text.insert("1.0", str(cfg["criteria"]))
@@ -1069,6 +1868,10 @@ class App(tk.Tk):
                 if not isinstance(slot_cfg, dict):
                     continue
                 slot["enabled"].set(bool(slot_cfg.get("enabled", False)))
+                prof_name = str(slot_cfg.get("profile") or self._CROSS_REUSE_LABEL)
+                if prof_name not in self._cross_profile_choices():
+                    prof_name = self._CROSS_REUSE_LABEL
+                slot["profile"].set(prof_name)
                 slot["model"].set(str(slot_cfg.get("model", "")))
                 slot["base_url"].set(str(slot_cfg.get("base_url", "")))
                 slot["api_key"].set(str(slot_cfg.get("api_key", "")))
@@ -1078,6 +1881,10 @@ class App(tk.Tk):
                 api_type = str(slot_cfg.get("api_type", "自动判断"))
                 if api_type in _API_TYPE_BY_LABEL:
                     slot["api_type"].set(api_type)
+                ref_profile = self._find_profile(
+                    self._active_profile_var.get() if prof_name == self._CROSS_REUSE_LABEL else prof_name
+                )
+                slot["combo_model"].configure(values=list(ref_profile["models"]) if ref_profile else [])
             self._sync_crosscheck_state()
 
         for key in ("screenshot_region_norm", "score_input_pos", "submit_btn_pos", "next_btn_pos"):
@@ -1237,11 +2044,25 @@ class App(tk.Tk):
         main_provider = self.provider_var.get()
         main_base_url = (self.base_url_var.get() or "").strip()
         main_api_key = (self.api_key_var.get() or "").strip()
-        main_is_special = main_provider in ("智谱AI", "百度千帆", "科大讯飞")
+        main_is_special = main_provider in self._SPECIAL_PROVIDERS
         if not main_base_url and not main_is_special and main_provider != "自定义":
             preset = self.PROVIDER_PRESETS.get(main_provider)
             if preset and preset[0]:
                 main_base_url = preset[0]
+
+        # 交叉校验仅支持 OpenAI 兼容接口：所选配置为专用接口时提前给出明确报错
+        for key, label in (("b", "模型B"), ("c", "模型C"), ("arbiter", "仲裁模型")):
+            slot_cfg = cc.get(key) or {}
+            if not slot_cfg.get("enabled"):
+                continue
+            prof_name = (slot_cfg.get("profile") or "").strip()
+            if prof_name and prof_name != self._CROSS_REUSE_LABEL:
+                prof = self._find_profile(prof_name)
+                if prof is not None and prof["provider"] in self._SPECIAL_PROVIDERS:
+                    raise ValueError(
+                        f"「{label}」所选接口配置「{prof_name}」是 {prof['provider']} 专用接口，"
+                        "交叉校验仅支持 OpenAI 兼容接口；请改选兼容网关配置或使用「复用主模型」"
+                    )
 
         def _build_slot(slot_cfg, slot_label):
             model_name = (slot_cfg.get("model") or "").strip()

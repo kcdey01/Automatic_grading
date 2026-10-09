@@ -177,6 +177,12 @@ class ScoringDatabase:
                 rows = conn.execute(f"SELECT {cols} FROM scoring_records ORDER BY id ASC").fetchall()
         return [dict(row) for row in rows]
 
+    def clear_records(self) -> int:
+        """删除全部评分记录（用于「清空记录」），返回删除条数。"""
+        with self._connection() as conn:
+            cur = conn.execute("DELETE FROM scoring_records")
+            return int(cur.rowcount or 0)
+
     def get_stats(self) -> dict[str, Any]:
         with self._connection() as conn:
             row = conn.execute(

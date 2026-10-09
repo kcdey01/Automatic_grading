@@ -11,6 +11,7 @@ __pycache__/
 # 评分数据库（含评分标准、AI 响应和截图路径）
 scores.db
 scores.db-*
+scores.db.bak
 
 # 评分标准（敏感信息）
 评分标准.txt

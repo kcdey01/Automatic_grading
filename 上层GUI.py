@@ -7,13 +7,14 @@
 python 上层GUI.py
 """
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import json
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -431,8 +432,11 @@ class App(tk.Tk):
         self.tune_tree.bind("<Motion>", self._on_tune_tree_motion)
         self.tune_tree.bind("<Leave>", self._hide_tune_preview)
 
+        record_bar = ttk.Frame(record_frame)
+        record_bar.pack(fill=tk.X, padx=10, pady=(2, 4))
         self.tune_status_var = tk.StringVar(value="未收集评分记录")
-        ttk.Label(record_frame, textvariable=self.tune_status_var).pack(anchor="w", padx=10, pady=(2, 4))
+        ttk.Label(record_bar, textvariable=self.tune_status_var).pack(side=tk.LEFT)
+        ttk.Button(record_bar, text="清空记录", command=self._clear_score_records).pack(side=tk.RIGHT, padx=(8, 0))
 
         # ── 快捷优化建议 ──
         quick_frame = ttk.LabelFrame(inner, text="快捷优化建议（输入优化想法→AI分析→生成新评分标准）")
@@ -2103,6 +2107,64 @@ class App(tk.Tk):
             return None
         self._next_record_index += 1
         return record
+
+    def _clear_score_records(self):
+        """清空评分记录：列表 + 数据库（清空前自动备份数据库，截图文件不受影响）。"""
+        try:
+            db_total = self.score_db.get_stats()["total"]
+        except Exception:
+            db_total = len(self.tuner.records)
+        if db_total <= 0 and not self.tuner.records:
+            messagebox.showinfo("清空记录", "当前没有可清空的评分记录。")
+            return
+        if not messagebox.askyesno(
+            "清空评分记录",
+            f"将清空列表，并删除数据库中的全部评分记录（数据库共 {db_total} 条）。\n\n"
+            "· 清空前会自动备份数据库到 scores.db.bak\n"
+            "· 截图文件（captures 目录）不受影响\n"
+            "· 此操作不可恢复，请确认后再继续。\n\n"
+            "确定要清空吗？",
+        ):
+            return
+
+        backup_note = ""
+        try:
+            db_path = Path(self.score_db.db_path)
+            if db_path.exists():
+                backup_path = db_path.with_name(db_path.name + ".bak")
+                shutil.copy2(db_path, backup_path)
+                backup_note = backup_path.name
+        except Exception as e:
+            print(f"[评分记录] 数据库备份失败：{e}")
+            if not messagebox.askyesno("备份失败", f"数据库备份失败：{e}\n\n仍要继续清空吗？"):
+                return
+
+        try:
+            deleted = self.score_db.clear_records()
+        except Exception as e:
+            messagebox.showerror("清空失败", f"数据库清空失败：{e}")
+            return
+
+        # 关闭详情窗口与悬停预览，重置内存与列表
+        detail_win = getattr(self, "_record_detail_window", None)
+        if detail_win is not None:
+            try:
+                detail_win.destroy()
+            except tk.TclError:
+                pass
+            self._record_detail_window = None
+        self._hide_tune_preview()
+        self.tuner.records.clear()
+        self.tuner.suggested_criteria = ""
+        self._next_record_index = 0
+        self._record_db_ids.clear()
+        for item in self.tune_tree.get_children():
+            self.tune_tree.delete(item)
+        self._tune_update_status()
+
+        tail = f"（已备份到 {backup_note}）" if backup_note else ""
+        print(f"[评分记录] 已清空 {deleted} 条评分记录{tail}")
+        messagebox.showinfo("已清空", f"已清空 {deleted} 条评分记录{tail}。")
 
     # ── 以下标记/调优方法为历史功能保留（当前 UI 已简化为纯记录浏览，未绑定任何控件；
     #    如需恢复「标记正确分数 + 规则调优」界面，重新添加对应控件并绑定这些方法即可） ──

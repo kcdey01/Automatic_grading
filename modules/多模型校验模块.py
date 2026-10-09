@@ -8,6 +8,7 @@
 - 分数不一致：进入第三轮校验
     * 独立仲裁：由仲裁模型独立重评（不参考前几轮结果），以其分数为准
     * 参考重评：由主模型带着前几轮的分数与评语重新评一次，以其分数为准
+    * 选取最高分：不额外调用模型，直接采用首轮各模型中给出的最高分（宽松策略）
   第三轮模式为「自动选择」时：配置了仲裁模型则独立仲裁，否则主模型参考重评。
 
 失败降级策略：
@@ -29,6 +30,7 @@ class MultiModelCrossChecker:
     ROUND3_AUTO = "auto"
     ROUND3_REREVIEW = "rereview"
     ROUND3_ARBITER = "arbiter"
+    ROUND3_MAX = "max"
 
     def __init__(self, primary_scorer, extra_scorers=None, arbiter_scorer=None,
                  tolerance=0, round3_mode=ROUND3_AUTO, on_notify=None):
@@ -37,7 +39,8 @@ class MultiModelCrossChecker:
         :param extra_scorers:  附加模型评分器列表（1~2 个）
         :param arbiter_scorer: 仲裁模型评分器（可选，第三轮独立仲裁用）
         :param tolerance:      分数容差，0 表示必须完全一致
-        :param round3_mode:    "auto"（自动选择）/ "rereview"（主模型参考重评）/ "arbiter"（独立仲裁）
+        :param round3_mode:    "auto"（自动选择）/ "rereview"（主模型参考重评）/
+                               "arbiter"（独立仲裁）/ "max"（选取首轮最高分）
         :param on_notify:      通知回调 (title, message, level)，用于「三轮分数均不一致」提醒；
                                None 表示仅打印日志。由上层注入线程安全实现。
         """
@@ -179,13 +182,37 @@ class MultiModelCrossChecker:
             return self.ROUND3_ARBITER
         if self.round3_mode == self.ROUND3_REREVIEW:
             return self.ROUND3_REREVIEW
+        if self.round3_mode == self.ROUND3_MAX:
+            return self.ROUND3_MAX
         # auto：配了仲裁模型就用独立仲裁，否则退回参考重评
         return self.ROUND3_ARBITER if self.arbiter_scorer is not None else self.ROUND3_REREVIEW
 
     def _third_round(self, image_path, criteria, results):
-        if self._resolve_round3_plan() == self.ROUND3_ARBITER:
+        plan = self._resolve_round3_plan()
+        if plan == self.ROUND3_ARBITER:
             return self._arbiter_round(image_path, criteria, results)
+        if plan == self.ROUND3_MAX:
+            return self._max_round(results)
         return self._rereview_round(image_path, criteria, results)
+
+    def _max_round(self, results):
+        """第三轮：不额外调用模型，直接选取首轮各有效分数中的最高分。"""
+        scored = [r for r in results if r["score"] is not None]
+        if not scored:
+            raise ValueError("选取最高分失败：没有可用的有效分数")
+        best = max(scored, key=lambda r: r["score"])
+        score = int(best["score"])
+        print(
+            f"[交叉校验] 第三轮：选取最高分，采用 {best['name']}（{best['model']}）"
+            f"的 {score} 分为首轮最高分"
+        )
+        info = {
+            "mode": "max",
+            "model": str(best.get("model") or ""),
+            "score": score,
+            "source": "选取最高分",
+        }
+        return score, info, best.get("response")
 
     def _arbiter_round(self, image_path, criteria, results):
         arbiter = self.arbiter_scorer
@@ -259,7 +286,10 @@ class MultiModelCrossChecker:
             return
         if any(abs(final_score - r["score"]) <= self.tolerance for r in scored):
             return
-        round3_label = "独立仲裁" if round3_info.get("mode") == "arbiter" else "参考重评"
+        round3_label = {
+            "arbiter": "独立仲裁",
+            "max": "选取最高分",
+        }.get(round3_info.get("mode"), "参考重评")
         first_summary = "、".join(f"{r['name']}（{r['model']}）{r['score']}分" for r in scored)
         self._alert(
             "三轮校验分数均不一致",

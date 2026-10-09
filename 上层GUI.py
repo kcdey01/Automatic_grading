@@ -13,7 +13,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -543,7 +543,7 @@ class App(tk.Tk):
             cross_head,
             textvariable=self.round3_mode_var,
             width=14,
-            values=["自动选择", "主模型参考重评", "独立仲裁模型"],
+            values=["自动选择", "主模型参考重评", "独立仲裁模型", "选取最高分"],
             state="readonly",
         )
         self.round3_mode_combo.pack(side=tk.LEFT, padx=(4, 0))
@@ -1767,6 +1767,7 @@ class App(tk.Tk):
         "自动选择": "auto",
         "主模型参考重评": "rereview",
         "独立仲裁模型": "arbiter",
+        "选取最高分": "max",
     }
 
     def _build_cross_slot(self, parent, row, key, label, hint):
@@ -2557,10 +2558,12 @@ class App(tk.Tk):
             raise ValueError("第三轮模式为「独立仲裁模型」，请启用仲裁模型并填写模型名（或改为「自动选择」）")
 
         summary = "、".join(getattr(s, "model", "") for s in extras)
-        arbiter_note = (
-            f"；仲裁模型 {arbiter_scorer.model}" if arbiter_scorer is not None
-            else "；未配置仲裁模型（第三轮将由主模型参考重评）"
-        )
+        if arbiter_scorer is not None:
+            arbiter_note = f"；仲裁模型 {arbiter_scorer.model}"
+        elif round3_mode == "max":
+            arbiter_note = "；未配置仲裁模型（第三轮策略：选取最高分）"
+        else:
+            arbiter_note = "；未配置仲裁模型（第三轮将由主模型参考重评）"
         print(
             f"[交叉校验] 已启用：主模型 {getattr(primary_scorer, 'model', '')} + {summary}"
             f"{arbiter_note}；容差 {cc.get('tolerance', 0)} 分"
@@ -3180,7 +3183,10 @@ class App(tk.Tk):
             )
         round3 = cross_check.get("round3")
         if isinstance(round3, dict):
-            mode_label = "独立仲裁" if round3.get("mode") == "arbiter" else "参考重评"
+            mode_label = {
+                "arbiter": "独立仲裁",
+                "max": "选取最高分",
+            }.get(round3.get("mode"), "参考重评")
             lines.append("")
             lines.append("【第三轮校验】")
             lines.append(f"  方式：{mode_label}（{round3.get('model') or '—'}）")
@@ -3337,6 +3343,8 @@ class App(tk.Tk):
             return "三轮·仲裁"
         if "参考重评" in flow:
             return "三轮·重评"
+        if "选取最高分" in flow:
+            return "三轮·最高分"
         if "回退" in flow:
             return "降级·回退"
         if "仅主模型" in flow:

@@ -13,7 +13,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -489,6 +489,12 @@ class App(tk.Tk):
 
         self.progress_var = tk.StringVar(value="未开始")
         ttk.Label(runbox, textvariable=self.progress_var).grid(row=0, column=3, padx=12, pady=8, sticky="w")
+
+        # 批量阅卷：依据平均用时估算剩余时间与预计完成时刻
+        self.eta_var = tk.StringVar(value="")
+        ttk.Label(runbox, textvariable=self.eta_var, foreground="#0a6").grid(
+            row=3, column=0, columnspan=4, padx=8, pady=(0, 8), sticky="w"
+        )
 
         ttk.Label(runbox, text="输入框全选方式").grid(row=1, column=0, padx=8, sticky="w")
         self.select_all_method_var = tk.StringVar(value="三击选中（推荐）")
@@ -2701,6 +2707,8 @@ class App(tk.Tk):
         sys_.question_count = 0
         self._run_started_at = time.time()
         self.run_duration_var.set("本次评分总用时：0.0s（进行中）")
+        if getattr(self, "eta_var", None) is not None:
+            self.eta_var.set("")
         sys_.start()
         self.progress_var.set("运行中…")
         self.after(200, self._poll_progress)
@@ -2721,6 +2729,29 @@ class App(tk.Tk):
             var.set(f"本次评分总用时：{text}")
             self._run_started_at = None
 
+    def _update_eta(self):
+        """批量模式：按已处理份数的平均用时，估算剩余时间与预计完成时刻。"""
+        var = getattr(self, "eta_var", None)
+        sys_ = self.system
+        if var is None or sys_ is None or not sys_.batch_mode:
+            return
+        processed = int(sys_.question_count or 0)
+        started = self._run_started_at
+        if started is None or processed <= 0:
+            var.set("预计完成：正在估算…")
+            return
+        avg = (time.time() - started) / processed
+        avg_text = self._format_duration(avg)
+        total = int(sys_.total_questions or 0)
+        if total > 0:
+            remaining = max(0.0, (total - processed) * avg)
+            eta_clock = time.strftime("%H:%M:%S", time.localtime(time.time() + remaining))
+            var.set(
+                f"平均用时 {avg_text}/份 · 预计剩余 {self._format_duration(remaining)} · 预计完成 {eta_clock}"
+            )
+        else:
+            var.set(f"平均用时 {avg_text}/份（未设定总份数，无法预估完成时刻）")
+
     def _poll_progress(self):
         sys_ = self.system
         if not sys_:
@@ -2735,6 +2766,7 @@ class App(tk.Tk):
             else:
                 self.progress_var.set("单题处理中…")
             self._refresh_run_duration(running=True)
+            self._update_eta()
             self.after(350, self._poll_progress)
         else:
             if sys_.batch_mode:
@@ -2742,11 +2774,15 @@ class App(tk.Tk):
             else:
                 self.progress_var.set("已完成（单题）")
             self._refresh_run_duration(running=False)
+            if getattr(self, "eta_var", None) is not None:
+                self.eta_var.set("")
 
     def _stop(self):
         if self.system:
             self.system.stop()
         self.progress_var.set("已停止")
+        if getattr(self, "eta_var", None) is not None:
+            self.eta_var.set("")
 
     def _clear_log(self):
         self.log_text.delete("1.0", "end")

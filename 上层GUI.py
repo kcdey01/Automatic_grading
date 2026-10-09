@@ -7,7 +7,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -103,6 +103,7 @@ class App(tk.Tk):
         self._load_config(silent=True)
         self._sync_batch_state()
         self._update_ready_status()
+        self._load_score_history()
         self.after(60, self._drain_log_queue)
 
     def _build_menu(self):
@@ -404,55 +405,34 @@ class App(tk.Tk):
         )
         self._sync_crosscheck_state()
 
-        # ── 规则调优 ──
-        tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
-        tune_frame.pack(fill=tk.BOTH, expand=False, **pad)
+        # ── AI 评分记录 ──
+        record_frame = ttk.LabelFrame(inner, text="AI 评分记录（双击记录查看截图与评分详情）")
+        record_frame.pack(fill=tk.BOTH, expand=False, **pad)
 
-        tune_top = ttk.Frame(tune_frame)
-        tune_top.pack(fill=tk.X, padx=8, pady=(4, 0))
+        record_top = ttk.Frame(record_frame)
+        record_top.pack(fill=tk.X, padx=8, pady=(4, 0))
 
-        tree_frame = ttk.Frame(tune_top)
+        tree_frame = ttk.Frame(record_top)
         tree_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        columns = ("序号", "AI分数", "正确分数", "错误原因", "状态")
-        self.tune_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=4)
+        columns = ("序号", "题号", "AI分数", "模型", "交叉校验")
+        self.tune_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=6)
         for col in columns:
             self.tune_tree.heading(col, text=col)
         self.tune_tree.column("序号", width=50, anchor="center")
+        self.tune_tree.column("题号", width=60, anchor="center")
         self.tune_tree.column("AI分数", width=70, anchor="center")
-        self.tune_tree.column("正确分数", width=70, anchor="center")
-        self.tune_tree.column("错误原因", width=160, anchor="w")
-        self.tune_tree.column("状态", width=80, anchor="center")
-        self.tune_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.tune_tree.bind("<<TreeviewSelect>>", self._on_tune_tree_select)
+        self.tune_tree.column("模型", width=170, anchor="w")
+        self.tune_tree.column("交叉校验", width=110, anchor="center")
+        _record_sb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tune_tree.yview)
+        self.tune_tree.configure(yscrollcommand=_record_sb.set)
+        _record_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tune_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tune_tree.bind("<Double-1>", self._on_record_double_click)
         self.tune_tree.bind("<Motion>", self._on_tune_tree_motion)
         self.tune_tree.bind("<Leave>", self._hide_tune_preview)
 
-        tune_btns = ttk.Frame(tune_top)
-        tune_btns.pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Label(tune_btns, text="正确分数:").pack(anchor="w")
-        self.tune_manual_var = tk.StringVar()
-        ttk.Entry(tune_btns, textvariable=self.tune_manual_var, width=8).pack(anchor="w", pady=2)
-        ttk.Label(tune_btns, text="错误原因:").pack(anchor="w", pady=(4, 0))
-        self.tune_reason_var = tk.StringVar()
-        ttk.Entry(tune_btns, textvariable=self.tune_reason_var, width=18).pack(anchor="w", pady=2)
-        ttk.Button(tune_btns, text="标记", width=10, command=self._tune_mark_score).pack(anchor="w", pady=1)
-
-        tune_bar = ttk.Frame(tune_frame)
-        tune_bar.pack(fill=tk.X, padx=8, pady=(2, 4))
-        ttk.Button(tune_bar, text="规则调优（分析偏差→生成新规则）", command=self._run_tuning).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tune_bar, text="应用新规则", command=self._apply_tuning).pack(side=tk.LEFT, padx=4)
-        ttk.Button(tune_bar, text="清空记录", command=self._clear_tuning).pack(side=tk.LEFT, padx=4)
-
         self.tune_status_var = tk.StringVar(value="未收集评分记录")
-        ttk.Label(tune_bar, textvariable=self.tune_status_var).pack(side=tk.LEFT, padx=12)
-
-        _tune_result_inner = ttk.Frame(tune_frame)
-        _tune_result_inner.pack(fill=tk.X, padx=8, pady=(0, 4))
-        self.tune_result_text = tk.Text(_tune_result_inner, height=4, wrap="word", state="disabled")
-        _tune_result_sb = ttk.Scrollbar(_tune_result_inner, command=_make_text_yview_command(self.tune_result_text))
-        self.tune_result_text.configure(yscrollcommand=_tune_result_sb.set)
-        _tune_result_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tune_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ttk.Label(record_frame, textvariable=self.tune_status_var).pack(anchor="w", padx=10, pady=(2, 4))
 
         # ── 快捷优化建议 ──
         quick_frame = ttk.LabelFrame(inner, text="快捷优化建议（输入优化想法→AI分析→生成新评分标准）")
@@ -671,6 +651,9 @@ class App(tk.Tk):
         self.system.filler.config["batch_mode"] = bool(self.batch_var.get())
 
     # ── 多模型交叉校验 ──
+
+    # 启动时最多加载的历史评分记录条数
+    HISTORY_LOAD_LIMIT = 1000
 
     _ROUND3_MODE_MAP = {
         "自动选择": "auto",
@@ -1713,15 +1696,18 @@ class App(tk.Tk):
         frame = ttk.Frame(win, padding=8, relief="solid", borderwidth=1)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        manual_score = "未标记" if record.manual_score is None else f"{record.manual_score}分"
         info_lines = [
-            f"记录序号：{record.index}",
-            f"AI 分数：{record.ai_score}分",
-            f"正确分数：{manual_score}",
-            f"状态：{record.status}",
+            f"记录 #{record.index} | 题号 {record.question_index or '—'}",
+            f"时间：{record.created_at or '—'}",
+            f"AI 分数：{self._format_score(record.ai_score)}分 | 模型 {record.model or '—'}",
         ]
-        if record.manual_score is not None and record.manual_score != record.ai_score:
-            info_lines.append(f"错误原因：{record.error_reason or '未填写'}")
+        if isinstance(record.cross_check, dict) and record.cross_check:
+            info_lines.append(f"多模型校验：{self._summarize_cross_check(record.cross_check)}")
+        if record.manual_score is not None:
+            info_lines.append(f"人工标注：{self._format_score(record.manual_score)}分")
+            if record.manual_score != record.ai_score:
+                info_lines.append(f"错误原因：{record.error_reason or '未填写'}")
+        info_lines.append("双击查看完整详情")
         for line in info_lines:
             ttk.Label(frame, text=line).pack(anchor="w")
 
@@ -1775,6 +1761,183 @@ class App(tk.Tk):
         self._tune_preview_image_ref = None
         self._tune_preview_item = None
 
+    # ── 评分记录详情窗口（双击打开） ──
+
+    def _on_record_double_click(self, event):
+        row_id = self.tune_tree.identify_row(event.y)
+        if not row_id:
+            return
+        record = self._get_tune_record_by_item(row_id)
+        if record is None:
+            return
+        self._hide_tune_preview()
+        self._show_record_detail(record)
+
+    def _show_record_detail(self, record):
+        """打开独立窗口显示截图与评分详情（含多模型交叉校验各模型分数）。"""
+        old = getattr(self, "_record_detail_window", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+
+        win = tk.Toplevel(self)
+        self._record_detail_window = win
+        win.title(f"评分记录详情 #{record.index}")
+        win.geometry("1020x700")
+        win.minsize(800, 560)
+        win.tk.call("wm", "attributes", str(win), "-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_record_detail(win))
+
+        body = ttk.Frame(win)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # 左侧：截图
+        left = ttk.Frame(body)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        self._record_detail_image_ref = None
+        image_path = (record.image_path or "").strip()
+        if not image_path:
+            ttk.Label(left, text="截图路径缺失").pack(anchor="w")
+        else:
+            path = Path(image_path)
+            ttk.Label(left, text=f"截图：{path.name}").pack(anchor="w", pady=(0, 4))
+            if not path.exists():
+                ttk.Label(left, text="截图文件不存在（可能已被清理）").pack(anchor="w")
+            else:
+                try:
+                    with Image.open(path) as img:
+                        img.thumbnail((560, 600))
+                        photo = ImageTk.PhotoImage(img.copy())
+                    self._record_detail_image_ref = photo
+                    ttk.Label(left, image=photo).pack(anchor="w")
+                except Exception as e:
+                    ttk.Label(left, text=f"截图加载失败：{e}").pack(anchor="w")
+
+        # 右侧：详情标签页
+        right = ttk.Frame(body)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        notebook = ttk.Notebook(right)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        self._add_detail_text_tab(notebook, "评分详情", self._build_record_detail_text(record))
+        self._add_detail_text_tab(notebook, "多模型校验", self._build_cross_check_text(record))
+        self._add_detail_text_tab(notebook, "AI 反馈", self._extract_feedback_text(record.ai_response))
+        self._add_detail_text_tab(notebook, "评分标准", record.criteria or "（未记录评分标准）")
+
+        # 底部按钮
+        bar = ttk.Frame(win)
+        bar.pack(fill=tk.X, padx=8, pady=(0, 8))
+        if image_path and Path(image_path).exists():
+            ttk.Button(bar, text="用系统程序打开原图", command=lambda: self._open_image_file(image_path)).pack(side=tk.LEFT)
+        ttk.Button(bar, text="关闭", command=lambda: self._close_record_detail(win)).pack(side=tk.RIGHT)
+
+    def _close_record_detail(self, win):
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+        if getattr(self, "_record_detail_window", None) is win:
+            self._record_detail_window = None
+        self._record_detail_image_ref = None
+
+    def _add_detail_text_tab(self, notebook, title, content):
+        frame = ttk.Frame(notebook)
+        text = tk.Text(frame, wrap="word", font=("Microsoft YaHei UI", 10))
+        def _scroll(*args: str) -> None:
+            text.tk.call(str(text), "yview", *args)
+        sb = ttk.Scrollbar(frame, command=_scroll)
+        text.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text.insert("1.0", content)
+        text.configure(state="disabled")
+        notebook.add(frame, text=title)
+
+    def _build_record_detail_text(self, record):
+        lines = [
+            f"序号：#{record.index}",
+            f"题号：{record.question_index or '—'}",
+            f"主模型：{record.model or '—'}",
+            f"评分时间：{record.created_at or '—'}",
+            f"AI 最终分数：{self._format_score(record.ai_score)} 分",
+        ]
+        status = getattr(record, "status", "")
+        if record.manual_score is not None:
+            lines.append(f"人工标注分数：{self._format_score(record.manual_score)} 分（{status}）")
+            if record.error_reason:
+                lines.append(f"错误原因：{record.error_reason}")
+        cross_check = getattr(record, "cross_check", None)
+        lines.append("")
+        if isinstance(cross_check, dict) and cross_check:
+            lines.append(f"多模型交叉校验：已启用（{self._summarize_cross_check(cross_check)}）")
+            lines.append(
+                f"最终采用：{self._format_score(cross_check.get('final_score'))} 分"
+                f"（{cross_check.get('final_source') or '—'}）"
+            )
+            lines.append("各模型分数详见「多模型校验」标签页")
+        else:
+            lines.append("多模型交叉校验：未启用（本记录无多模型明细）")
+        lines.append("")
+        lines.append(f"截图文件：{record.image_path or '（无）'}")
+        return "\n".join(lines)
+
+    def _build_cross_check_text(self, record):
+        cross_check = getattr(record, "cross_check", None)
+        if not isinstance(cross_check, dict) or not cross_check:
+            return "该记录未启用多模型交叉校验，或没有可显示的明细。"
+        lines = [
+            f"流程：{cross_check.get('flow') or '—'}",
+            f"分数容差：{cross_check.get('tolerance', 0)} 分",
+            "",
+            "【首轮各模型评分】",
+        ]
+        for item in cross_check.get("scores") or []:
+            if not isinstance(item, dict):
+                continue
+            score = item.get("score")
+            score_txt = f"{self._format_score(score)} 分" if score is not None else "评分失败"
+            err_txt = f"（{item.get('error')}）" if item.get("error") else ""
+            elapsed = item.get("elapsed_seconds")
+            elapsed_txt = f"，用时 {elapsed}s" if elapsed is not None else ""
+            lines.append(
+                f"  {item.get('name') or '模型'}（{item.get('model') or '—'}）：{score_txt}{err_txt}{elapsed_txt}"
+            )
+        round3 = cross_check.get("round3")
+        if isinstance(round3, dict):
+            mode_label = "独立仲裁" if round3.get("mode") == "arbiter" else "参考重评"
+            lines.append("")
+            lines.append("【第三轮校验】")
+            lines.append(f"  方式：{mode_label}（{round3.get('model') or '—'}）")
+            lines.append(f"  结果：{self._format_score(round3.get('score'))} 分")
+            if round3.get("error"):
+                lines.append(f"  异常：{round3['error']}")
+            lines.append(f"  说明：{round3.get('source') or '—'}")
+        lines.append("")
+        lines.append(
+            f"【最终结果】{self._format_score(cross_check.get('final_score'))} 分"
+            f"（{cross_check.get('final_source') or '—'}）"
+        )
+        if cross_check.get("elapsed_total") is not None:
+            lines.append(f"总用时：{cross_check.get('elapsed_total')}s")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_feedback_text(full_text):
+        text = full_text or ""
+        if not text.strip():
+            return "（无 AI 反馈文本）"
+        if "===反馈开始===" in text and "===反馈结束===" in text:
+            feedback = text.split("===反馈开始===")[1].split("===反馈结束===")[0].strip()
+            return feedback or "（反馈为空）"
+        return text
+
+    def _open_image_file(self, image_path):
+        try:
+            os.startfile(image_path)  # type: ignore[attr-defined]
+        except Exception as e:
+            messagebox.showerror("打开失败", f"无法打开截图：{e}")
+
     def _tune_add_record(self, question_index, score, response_info, image_path=""):
         """从评分回调线程接收记录（线程安全）"""
         self.after(0, self._tune_add_record_ui, question_index, score, response_info, image_path)
@@ -1782,6 +1945,9 @@ class App(tk.Tk):
     def _save_score_record(self, record, question_index):
         mode = "batch" if self.batch_var.get() else "single"
         question_value = "single" if question_index is None else str(question_index)
+        cross_check_raw = getattr(record, "cross_check", "") or ""
+        if not isinstance(cross_check_raw, str):
+            cross_check_raw = json.dumps(cross_check_raw, ensure_ascii=False)
         db_id = self.score_db.insert_record(
             session_id=self._score_session_id,
             record_index=record.index,
@@ -1797,7 +1963,7 @@ class App(tk.Tk):
             ai_response=record.ai_response,
             image_path=record.image_path,
             error_reason=record.error_reason,
-            cross_check=getattr(record, "cross_check", ""),
+            cross_check=cross_check_raw,
         )
         self._record_db_ids[record.index] = db_id
         return db_id
@@ -1814,20 +1980,132 @@ class App(tk.Tk):
             ai_response=response_info.get("full_response", ""),
             criteria=criteria,
             image_path=image_path or "",
-            cross_check=(json.dumps(cross_check_info, ensure_ascii=False) if cross_check_info else ""),
+            cross_check=(cross_check_info if isinstance(cross_check_info, dict) else ""),
+            question_index=("single" if question_index is None else str(question_index)),
+            model=str(response_info.get("model") or (self.model_var.get() or "").strip()),
+            created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         )
         self.tuner.add_record(record)
         try:
             self._save_score_record(record, question_index)
         except Exception as e:
             print(f"[评分数据库] 写入失败：{e}")
-        self.tune_tree.insert("", "end", values=(idx, score, "—", "", "待标记"))
+        self._append_record_row(record)
         q_label = f"题目 {question_index}" if question_index is not None else "当前题目"
         cc_note = ""
         if isinstance(cross_check_info, dict) and cross_check_info.get("flow"):
             cc_note = f" | 交叉校验：{cross_check_info.get('flow')}"
-        print(f"[规则调优] 记录 #{idx} 已添加 | {q_label} | AI分数：{score}分{cc_note}")
+        print(f"[评分记录] 记录 #{idx} 已添加 | {q_label} | AI分数：{score}分{cc_note}")
         self._tune_update_status()
+
+    def _append_record_row(self, record):
+        """把记录追加到列表并滚动到最新一行。"""
+        self.tune_tree.insert("", "end", values=self._record_tree_values(record))
+        children = self.tune_tree.get_children()
+        if children:
+            self.tune_tree.see(children[-1])
+
+    def _record_tree_values(self, record):
+        return (
+            record.index,
+            record.question_index or "—",
+            self._format_score(record.ai_score),
+            record.model or "—",
+            self._summarize_cross_check(getattr(record, "cross_check", None)),
+        )
+
+    @staticmethod
+    def _format_score(value):
+        if value is None:
+            return "—"
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return str(int(num)) if num.is_integer() else f"{num:g}"
+
+    @staticmethod
+    def _summarize_cross_check(cross_check) -> str:
+        """把交叉校验明细压缩成列表里的短标签。"""
+        if not isinstance(cross_check, dict) or not cross_check:
+            return "—"
+        flow = str(cross_check.get("flow") or "")
+        if "独立仲裁" in flow:
+            return "三轮·仲裁"
+        if "参考重评" in flow:
+            return "三轮·重评"
+        if "回退" in flow:
+            return "降级·回退"
+        if "仅主模型" in flow:
+            return "降级·单模型"
+        if "一致放行" in flow:
+            return "一致"
+        return "已启用"
+
+    def _load_score_history(self):
+        """启动时从数据库加载历史评分记录到列表（与本次运行的记录连续编号）。"""
+        try:
+            rows = self.score_db.fetch_records(limit=self.HISTORY_LOAD_LIMIT)
+        except Exception as e:
+            print(f"[评分记录] 历史记录加载失败：{e}")
+            return
+        if not rows:
+            self._tune_update_status()
+            return
+        loaded = 0
+        for row in rows:
+            record = self._record_from_db_row(row)
+            if record is None:
+                continue
+            self.tuner.add_record(record)
+            self.tune_tree.insert("", "end", values=self._record_tree_values(record))
+            try:
+                self._record_db_ids[record.index] = int(row.get("id"))
+            except (TypeError, ValueError):
+                pass
+            loaded += 1
+        if self.tune_tree.get_children():
+            self.tune_tree.see(self.tune_tree.get_children()[-1])
+        capped = len(rows) >= self.HISTORY_LOAD_LIMIT
+        note = f"（超过上限，仅显示最近 {self.HISTORY_LOAD_LIMIT} 条）" if capped else ""
+        print(f"[评分记录] 已从数据库加载历史记录 {loaded} 条{note}")
+        self._tune_update_status()
+
+    def _record_from_db_row(self, row):
+        """把数据库行转换为 ScoringRecord（用于历史记录展示）。"""
+        try:
+            cross_raw = row.get("cross_check") or ""
+            cross_data = ""
+            if isinstance(cross_raw, dict):
+                cross_data = cross_raw
+            elif isinstance(cross_raw, str) and cross_raw.strip():
+                try:
+                    parsed = json.loads(cross_raw)
+                    if isinstance(parsed, dict):
+                        cross_data = parsed
+                except (ValueError, TypeError):
+                    cross_data = ""
+            record = ScoringRecord(
+                index=self._next_record_index,
+                ai_score=row.get("ai_score"),
+                ai_response=row.get("ai_response") or "",
+                criteria=row.get("criteria") or "",
+                image_path=row.get("image_path") or "",
+                manual_score=row.get("manual_score"),
+                error_reason=row.get("error_reason") or "",
+                cross_check=cross_data,
+                question_index=row.get("question_index") or "",
+                model=row.get("model") or "",
+                created_at=row.get("created_at") or "",
+            )
+        except Exception as e:
+            print(f"[评分记录] 历史记录解析失败：{e}")
+            return None
+        self._next_record_index += 1
+        return record
+
+    # ── 以下标记/调优方法为历史功能保留（当前 UI 已简化为纯记录浏览，未绑定任何控件；
+    #    如需恢复「标记正确分数 + 规则调优」界面，重新添加对应控件并绑定这些方法即可） ──
 
     def _on_tune_tree_select(self, event):
         sel = self.tune_tree.selection()
@@ -1973,16 +2251,14 @@ class App(tk.Tk):
         self._tune_update_status()
 
     def _tune_update_status(self):
-        stats = self.tuner.get_stats()
+        total = len(self.tuner.records)
         try:
             db_stats = self.score_db.get_stats()
-            avg_score = db_stats["avg_ai_score"]
-            history = f" | 历史 {db_stats['total']} 条 | 平均AI {avg_score:.1f}分"
+            self.tune_status_var.set(
+                f"列表共 {total} 条记录（数据库累计 {db_stats['total']} 条）· 双击记录查看截图与评分详情"
+            )
         except Exception:
-            history = ""
-        self.tune_status_var.set(
-            f"本次 {stats['total']} 条 | 已标记 {stats['marked']} 条 | 偏差 {stats['mismatches']} 条{history}"
-        )
+            self.tune_status_var.set(f"列表共 {total} 条记录 · 双击记录查看截图与评分详情")
 
     # ── 快捷优化评分标准 ──
 

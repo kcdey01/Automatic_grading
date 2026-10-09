@@ -162,6 +162,21 @@ class ScoringDatabase:
                 (manual_score, error_reason, status, self._now(), record_id),
             )
 
+    def fetch_records(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """读取评分记录（按 id 升序返回）；limit 表示最多取最近 N 条。"""
+        cols = ", ".join(self.COLUMNS)
+        with self._connection() as conn:
+            if limit is not None and int(limit) > 0:
+                rows = conn.execute(
+                    f"SELECT {cols} FROM ("
+                    f"SELECT {cols} FROM scoring_records ORDER BY id DESC LIMIT ?"
+                    f") ORDER BY id ASC",
+                    (int(limit),),
+                ).fetchall()
+            else:
+                rows = conn.execute(f"SELECT {cols} FROM scoring_records ORDER BY id ASC").fetchall()
+        return [dict(row) for row in rows]
+
     def get_stats(self) -> dict[str, Any]:
         with self._connection() as conn:
             row = conn.execute(

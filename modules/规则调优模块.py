@@ -17,7 +17,8 @@ from modules.自动评分模块 import call_llm_text
 class ScoringRecord:
     """单次评分记录"""
 
-    def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None, error_reason="", cross_check=""):
+    def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None,
+                 error_reason="", cross_check="", question_index="", model="", created_at=""):
         self.index = index
         self.ai_score = ai_score
         self.ai_response = ai_response
@@ -25,7 +26,10 @@ class ScoringRecord:
         self.image_path = image_path
         self.manual_score = manual_score
         self.error_reason = error_reason
-        self.cross_check = cross_check
+        self.cross_check = cross_check  # 多模型交叉校验明细（dict）或空
+        self.question_index = question_index  # 题号（"single" 表示单题）
+        self.model = model  # 主模型名
+        self.created_at = created_at  # 评分时间（历史记录从数据库读取）
 
     @property
     def status(self):

@@ -7,7 +7,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -26,6 +26,7 @@ from PIL import Image, ImageTk
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动截图模块 import format_tk_geometry, get_virtual_screen_geometry
 from modules.自动评分模块 import OpenAICompatibleScorer, ZhipuAIScorer, BaiduScorer, XunfeiScorer, fetch_openai_compatible_models
+from modules.多模型校验模块 import MultiModelCrossChecker
 # AutoFiller was previously imported but not used in this file; remove to avoid unused-import errors
 from modules.规则调优模块 import RuleTuner, ScoringRecord
 from modules.评分数据库模块 import ScoringDatabase
@@ -350,6 +351,58 @@ class App(tk.Tk):
         ).grid(row=2, column=0, padx=8, pady=(4, 8), sticky="w")
         ttk.Label(runbox, text="单题不提交/下一题；批量只点下一题不提交").grid(row=2, column=1, columnspan=3, padx=8, pady=(4, 8), sticky="w")
 
+        # ── 多模型交叉校验 ──
+        crossbox = ttk.LabelFrame(
+            inner,
+            text="多模型交叉校验（主模型＋附加模型同题并行批改 → 分数比对 → 不一致时第三轮校验）",
+        )
+        crossbox.pack(fill=tk.X, **pad)
+
+        cross_head = ttk.Frame(crossbox)
+        cross_head.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        self.cross_check_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            cross_head,
+            text="启用多模型交叉校验",
+            variable=self.cross_check_var,
+            command=self._sync_crosscheck_state,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(cross_head, text="分数容差").pack(side=tk.LEFT, padx=(16, 0))
+        self.cross_tolerance_var = tk.StringVar(value="0")
+        self.cross_tolerance_spin = ttk.Spinbox(
+            cross_head, from_=0, to=10, width=4, textvariable=self.cross_tolerance_var
+        )
+        self.cross_tolerance_spin.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(cross_head, text="分（0=必须完全一致）").pack(side=tk.LEFT)
+
+        ttk.Label(cross_head, text="第三轮").pack(side=tk.LEFT, padx=(16, 0))
+        self.round3_mode_var = tk.StringVar(value="自动选择")
+        self.round3_mode_combo = ttk.Combobox(
+            cross_head,
+            textvariable=self.round3_mode_var,
+            width=14,
+            values=["自动选择", "主模型参考重评", "独立仲裁模型"],
+            state="readonly",
+        )
+        self.round3_mode_combo.pack(side=tk.LEFT, padx=(4, 0))
+
+        cross_grid = ttk.Frame(crossbox)
+        cross_grid.pack(fill=tk.X, padx=8, pady=(2, 6))
+        self._cross_slots = {}
+        next_row = 0
+        next_row = self._build_cross_slot(
+            cross_grid, next_row, "b", "模型B", "base_url / API Key 留空时复用主模型的连接"
+        )
+        next_row = self._build_cross_slot(
+            cross_grid, next_row, "c", "模型C", "base_url / API Key 留空时复用主模型的连接"
+        )
+        self._build_cross_slot(
+            cross_grid, next_row, "arbiter", "仲裁模型", "第三轮独立仲裁用；未启用且第三轮为「自动选择」时，改为「主模型参考重评」"
+        )
+        self._sync_crosscheck_state()
+
         # ── 规则调优 ──
         tune_frame = ttk.LabelFrame(inner, text="规则调优（收集评分记录→标记正确分数→自动优化评分标准）")
         tune_frame.pack(fill=tk.BOTH, expand=False, **pad)
@@ -596,6 +649,99 @@ class App(tk.Tk):
         self.system.filler.config["review_score_check_enabled"] = bool(self.review_score_check_var.get())
         self.system.filler.config["batch_mode"] = bool(self.batch_var.get())
 
+    # ── 多模型交叉校验 ──
+
+    _ROUND3_MODE_MAP = {
+        "自动选择": "auto",
+        "主模型参考重评": "rereview",
+        "独立仲裁模型": "arbiter",
+    }
+
+    def _build_cross_slot(self, parent, row, key, label, hint):
+        """构建一个交叉校验模型配置槽位（启用开关 + 模型名/base_url/API Key + 思考模式/接口类型）。"""
+        slot = {
+            "enabled": tk.BooleanVar(value=False),
+            "model": tk.StringVar(),
+            "base_url": tk.StringVar(),
+            "api_key": tk.StringVar(),
+            "thinking": tk.StringVar(value="自动"),
+            "api_type": tk.StringVar(value="自动判断"),
+        }
+
+        line1 = ttk.Frame(parent)
+        line1.grid(row=row, column=0, sticky="we", pady=(2, 0))
+        slot["check"] = ttk.Checkbutton(
+            line1, text=label, variable=slot["enabled"], command=self._sync_crosscheck_state
+        )
+        slot["check"].pack(side=tk.LEFT)
+        ttk.Label(line1, text="模型名").pack(side=tk.LEFT, padx=(10, 0))
+        entry_model = ttk.Entry(line1, textvariable=slot["model"], width=16)
+        entry_model.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(line1, text="base_url").pack(side=tk.LEFT, padx=(10, 0))
+        entry_url = ttk.Entry(line1, textvariable=slot["base_url"], width=30)
+        entry_url.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+        ttk.Label(line1, text="API Key").pack(side=tk.LEFT, padx=(10, 0))
+        entry_key = ttk.Entry(line1, textvariable=slot["api_key"], width=18, show="*")
+        entry_key.pack(side=tk.LEFT, padx=(4, 0))
+
+        line2 = ttk.Frame(parent)
+        line2.grid(row=row + 1, column=0, sticky="we", pady=(0, 2))
+        ttk.Label(line2, text="思考模式").pack(side=tk.LEFT, padx=(28, 0))
+        combo_think = ttk.Combobox(
+            line2, textvariable=slot["thinking"], width=8, values=["自动", "关闭", "开启"], state="readonly"
+        )
+        combo_think.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(line2, text="接口类型").pack(side=tk.LEFT, padx=(10, 0))
+        combo_api = ttk.Combobox(
+            line2, textvariable=slot["api_type"], width=15, values=list(_API_TYPE_BY_LABEL.keys()), state="readonly"
+        )
+        combo_api.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(line2, text=hint).pack(side=tk.LEFT, padx=(12, 0))
+
+        slot["fields"] = [
+            (entry_model, "normal"),
+            (entry_url, "normal"),
+            (entry_key, "normal"),
+            (combo_think, "readonly"),
+            (combo_api, "readonly"),
+        ]
+        self._cross_slots[key] = slot
+        return row + 2
+
+    def _sync_crosscheck_state(self):
+        """根据总开关与各槽位开关，联动启用/禁用交叉校验的所有输入控件。"""
+        if not hasattr(self, "_cross_slots"):
+            return
+        master_enabled = bool(self.cross_check_var.get())
+        for slot in self._cross_slots.values():
+            slot["check"].configure(state=("normal" if master_enabled else "disabled"))
+            slot_enabled = master_enabled and bool(slot["enabled"].get())
+            for widget, enabled_state in slot["fields"]:
+                widget.configure(state=(enabled_state if slot_enabled else "disabled"))
+
+    def _get_cross_tolerance(self) -> int:
+        try:
+            return int(max(0, min(10, int(float(self.cross_tolerance_var.get())))))
+        except (TypeError, ValueError, tk.TclError):
+            return 0
+
+    def _collect_cross_config(self) -> dict:
+        cfg = {
+            "enabled": bool(self.cross_check_var.get()),
+            "tolerance": self._get_cross_tolerance(),
+            "round3_mode": self.round3_mode_var.get(),
+        }
+        for key, slot in getattr(self, "_cross_slots", {}).items():
+            cfg[key] = {
+                "enabled": bool(slot["enabled"].get()),
+                "model": slot["model"].get().strip(),
+                "base_url": slot["base_url"].get().strip(),
+                "api_key": slot["api_key"].get().strip(),
+                "thinking_mode": slot["thinking"].get(),
+                "api_type": slot["api_type"].get(),
+            }
+        return cfg
+
     def _fetch_models(self):
         provider = self.provider_var.get()
         if provider in {"智谱AI", "百度千帆", "科大讯飞"}:
@@ -772,6 +918,7 @@ class App(tk.Tk):
             "filler_mode": "pyautogui",
             "select_all_method": self._get_select_all_method(),
             "review_score_check_enabled": bool(self.review_score_check_var.get()),
+            "cross_check": self._collect_cross_config(),
         }
         cfg.update(self._collect_runtime_config())
         return cfg
@@ -840,6 +987,9 @@ class App(tk.Tk):
             "base_url": cfg.get("base_url", ""),
             "extra_headers_json": cfg.get("extra_headers_json", ""),
             "filler_mode": cfg.get("filler_mode", ""),
+            "thinking_mode": cfg.get("thinking_mode", ""),
+            "api_type": cfg.get("api_type", ""),
+            "cross_check": json.dumps(cfg.get("cross_check") or {}, ensure_ascii=False, sort_keys=True),
         }
         return json.dumps(key_obj, ensure_ascii=False, sort_keys=True)
 
@@ -895,6 +1045,32 @@ class App(tk.Tk):
 
         if "review_score_check_enabled" in cfg:
             self.review_score_check_var.set(bool(cfg["review_score_check_enabled"]))
+
+        cross_cfg = cfg.get("cross_check")
+        if isinstance(cross_cfg, dict):
+            self.cross_check_var.set(bool(cross_cfg.get("enabled", False)))
+            try:
+                self.cross_tolerance_var.set(str(int(cross_cfg.get("tolerance", 0))))
+            except (TypeError, ValueError):
+                self.cross_tolerance_var.set("0")
+            mode = str(cross_cfg.get("round3_mode", "自动选择"))
+            if mode in self._ROUND3_MODE_MAP:
+                self.round3_mode_var.set(mode)
+            for key, slot in getattr(self, "_cross_slots", {}).items():
+                slot_cfg = cross_cfg.get(key)
+                if not isinstance(slot_cfg, dict):
+                    continue
+                slot["enabled"].set(bool(slot_cfg.get("enabled", False)))
+                slot["model"].set(str(slot_cfg.get("model", "")))
+                slot["base_url"].set(str(slot_cfg.get("base_url", "")))
+                slot["api_key"].set(str(slot_cfg.get("api_key", "")))
+                thinking = str(slot_cfg.get("thinking_mode", "自动"))
+                if thinking in ("自动", "关闭", "开启"):
+                    slot["thinking"].set(thinking)
+                api_type = str(slot_cfg.get("api_type", "自动判断"))
+                if api_type in _API_TYPE_BY_LABEL:
+                    slot["api_type"].set(api_type)
+            self._sync_crosscheck_state()
 
         for key in ("screenshot_region_norm", "score_input_pos", "submit_btn_pos", "next_btn_pos"):
             if key in cfg:
@@ -971,6 +1147,7 @@ class App(tk.Tk):
 
         provider = self.provider_var.get()
         scorer = None
+        main_extra_headers: dict = {}
         if provider == "智谱AI":
             scorer = ZhipuAIScorer(api_key=api_key, model=model)
         elif provider == "百度千帆":
@@ -992,6 +1169,7 @@ class App(tk.Tk):
                         raise ValueError("额外请求头必须是 JSON 对象，例如 {\"X-My-Header\":\"1\"}")
                 except Exception as e:
                     raise ValueError(f"额外请求头JSON解析失败：{e}") from e
+            main_extra_headers = extra_headers
 
             scorer = OpenAICompatibleScorer(
                 base_url=base_url,
@@ -1001,6 +1179,8 @@ class App(tk.Tk):
                 enable_thinking=self._resolve_thinking_flag(),
                 api_type=self._resolve_api_type(),
             )
+
+        cross_checker = self._build_cross_checker(scorer, main_extra_headers)
 
         self.system = AutoScoringSystem(
             root=self,
@@ -1022,6 +1202,7 @@ class App(tk.Tk):
             before_capture=self._before_capture,
             after_capture=self._after_capture,
             blank_threshold=self._get_blank_threshold(),
+            cross_checker=cross_checker,
         )
         self._system_cfg_key = new_key
         self._sync_runtime_config_to_system()
@@ -1033,6 +1214,96 @@ class App(tk.Tk):
                 self.system.total_questions = 0
 
         return self.system
+
+    def _build_cross_checker(self, primary_scorer, main_extra_headers):
+        """根据界面配置构建多模型交叉校验器；未启用时返回 None。
+
+        附加模型（模型B / 模型C）与仲裁模型统一使用 OpenAI 兼容接口：
+        - base_url / API Key 留空时复用主模型的连接（仅主模型为 OpenAI 兼容服务商时可用）
+        """
+        cc = self._collect_cross_config()
+        if not cc.get("enabled"):
+            return None
+
+        main_provider = self.provider_var.get()
+        main_base_url = (self.base_url_var.get() or "").strip()
+        main_api_key = (self.api_key_var.get() or "").strip()
+        main_is_special = main_provider in ("智谱AI", "百度千帆", "科大讯飞")
+        if not main_base_url and not main_is_special and main_provider != "自定义":
+            preset = self.PROVIDER_PRESETS.get(main_provider)
+            if preset and preset[0]:
+                main_base_url = preset[0]
+
+        def _build_slot(slot_cfg, slot_label):
+            model_name = (slot_cfg.get("model") or "").strip()
+            if not model_name:
+                return None
+            base_url = (slot_cfg.get("base_url") or "").strip()
+            api_key = (slot_cfg.get("api_key") or "").strip()
+            if not base_url or not api_key:
+                if main_is_special:
+                    raise ValueError(
+                        f"「{slot_label}」需要填写自己的 base_url 和 API Key"
+                        f"（主模型为 {main_provider}，无法复用其连接）"
+                    )
+                base_url = base_url or main_base_url
+                api_key = api_key or main_api_key
+            if not base_url:
+                raise ValueError(f"「{slot_label}」未填写 base_url，且主模型的 base_url 为空，无法复用")
+            if not api_key:
+                raise ValueError(f"「{slot_label}」未填写 API Key，且主模型的 API Key 为空，无法复用")
+            # 仅在确实复用主模型连接时才带上主模型的额外请求头
+            reuses_main = base_url == main_base_url and api_key == main_api_key
+            thinking = {"关闭": False, "开启": True}.get(slot_cfg.get("thinking_mode", "自动"), None)
+            api_type = _API_TYPE_BY_LABEL.get(slot_cfg.get("api_type", "自动判断"), "auto")
+            return OpenAICompatibleScorer(
+                base_url=base_url,
+                api_key=api_key,
+                model=model_name,
+                extra_headers=(main_extra_headers or {}) if reuses_main else {},
+                enable_thinking=thinking,
+                api_type=api_type,
+            )
+
+        extras = []
+        for key, label in (("b", "模型B"), ("c", "模型C")):
+            slot_cfg = cc.get(key) or {}
+            if not slot_cfg.get("enabled"):
+                continue
+            slot_scorer = _build_slot(slot_cfg, label)
+            if slot_scorer is None:
+                raise ValueError(f"已启用「{label}」但未填写模型名")
+            extras.append(slot_scorer)
+        if not extras:
+            raise ValueError("已启用多模型交叉校验，但未启用任何附加模型（模型B / 模型C 至少启用一个）")
+
+        arbiter_scorer = None
+        arbiter_cfg = cc.get("arbiter") or {}
+        if arbiter_cfg.get("enabled"):
+            arbiter_scorer = _build_slot(arbiter_cfg, "仲裁模型")
+            if arbiter_scorer is None:
+                raise ValueError("已启用「仲裁模型」但未填写模型名")
+
+        round3_mode = self._ROUND3_MODE_MAP.get(cc.get("round3_mode", "自动选择"), "auto")
+        if round3_mode == "arbiter" and arbiter_scorer is None:
+            raise ValueError("第三轮模式为「独立仲裁模型」，请启用仲裁模型并填写模型名（或改为「自动选择」）")
+
+        summary = "、".join(getattr(s, "model", "") for s in extras)
+        arbiter_note = (
+            f"；仲裁模型 {arbiter_scorer.model}" if arbiter_scorer is not None
+            else "；未配置仲裁模型（第三轮将由主模型参考重评）"
+        )
+        print(
+            f"[交叉校验] 已启用：主模型 {getattr(primary_scorer, 'model', '')} + {summary}"
+            f"{arbiter_note}；容差 {cc.get('tolerance', 0)} 分"
+        )
+        return MultiModelCrossChecker(
+            primary_scorer=primary_scorer,
+            extra_scorers=extras,
+            arbiter_scorer=arbiter_scorer,
+            tolerance=cc.get("tolerance", 0),
+            round3_mode=round3_mode,
+        )
 
     def _select_region(self):
         try:
@@ -1503,6 +1774,7 @@ class App(tk.Tk):
             ai_response=record.ai_response,
             image_path=record.image_path,
             error_reason=record.error_reason,
+            cross_check=getattr(record, "cross_check", ""),
         )
         self._record_db_ids[record.index] = db_id
         return db_id
@@ -1511,12 +1783,15 @@ class App(tk.Tk):
         idx = self._next_record_index
         self._next_record_index += 1
         criteria = self.criteria_text.get("1.0", "end").strip()
+        response_info = response_info or {}
+        cross_check_info = response_info.get("cross_check")
         record = ScoringRecord(
             index=idx,
             ai_score=score,
             ai_response=response_info.get("full_response", ""),
             criteria=criteria,
             image_path=image_path or "",
+            cross_check=(json.dumps(cross_check_info, ensure_ascii=False) if cross_check_info else ""),
         )
         self.tuner.add_record(record)
         try:
@@ -1525,7 +1800,10 @@ class App(tk.Tk):
             print(f"[评分数据库] 写入失败：{e}")
         self.tune_tree.insert("", "end", values=(idx, score, "—", "", "待标记"))
         q_label = f"题目 {question_index}" if question_index is not None else "当前题目"
-        print(f"[规则调优] 记录 #{idx} 已添加 | {q_label} | AI分数：{score}分")
+        cc_note = ""
+        if isinstance(cross_check_info, dict) and cross_check_info.get("flow"):
+            cc_note = f" | 交叉校验：{cross_check_info.get('flow')}"
+        print(f"[规则调优] 记录 #{idx} 已添加 | {q_label} | AI分数：{score}分{cc_note}")
         self._tune_update_status()
 
     def _on_tune_tree_select(self, event):

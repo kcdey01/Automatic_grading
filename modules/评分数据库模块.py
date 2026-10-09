@@ -31,6 +31,7 @@ class ScoringDatabase:
         "status",
         "criteria",
         "ai_response",
+        "cross_check",
         "image_path",
         "created_at",
         "updated_at",
@@ -51,6 +52,7 @@ class ScoringDatabase:
         "status": "状态",
         "criteria": "评分标准",
         "ai_response": "AI响应",
+        "cross_check": "交叉校验",
         "image_path": "截图路径",
         "created_at": "创建时间",
         "updated_at": "更新时间",
@@ -94,6 +96,7 @@ class ScoringDatabase:
                     status TEXT NOT NULL,
                     criteria TEXT,
                     ai_response TEXT,
+                    cross_check TEXT,
                     image_path TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -105,6 +108,8 @@ class ScoringDatabase:
             }
             if "error_reason" not in existing_columns:
                 conn.execute("ALTER TABLE scoring_records ADD COLUMN error_reason TEXT")
+            if "cross_check" not in existing_columns:
+                conn.execute("ALTER TABLE scoring_records ADD COLUMN cross_check TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_scoring_records_session_record
@@ -134,6 +139,7 @@ class ScoringDatabase:
             "status": record.get("status", "待标记"),
             "criteria": record.get("criteria", ""),
             "ai_response": record.get("ai_response", ""),
+            "cross_check": record.get("cross_check", ""),
             "image_path": record.get("image_path", ""),
             "created_at": now,
             "updated_at": now,

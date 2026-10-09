@@ -55,6 +55,7 @@ a = Analysis(
         'modules',
         'modules.自动截图模块',
         'modules.自动评分模块',
+        'modules.多模型校验模块',
         'modules.自动填分模块',
         'modules.规则调优模块',
         'modules.评分数据库模块',

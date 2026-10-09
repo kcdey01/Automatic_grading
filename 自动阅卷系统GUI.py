@@ -49,6 +49,7 @@ class AutoScoringSystem:
         before_capture=None,
         after_capture=None,
         blank_threshold=15.0,
+        cross_checker=None,
     ):
         self.screenshot_tool = ScreenshotTool(
             on_region_selected=on_region_selected,
@@ -56,6 +57,8 @@ class AutoScoringSystem:
             after_capture=after_capture,
         )
         self.scorer = scorer if scorer is not None else ZhipuAIScorer(api_key, model)
+        # 多模型交叉校验器（None 表示未启用）；启用后由它完成评分并返回最终分数
+        self.cross_checker = cross_checker
         self.filler = AutoFiller(root, mode=filler_mode, config=filler_config or {}, on_position_selected=on_position_selected)
         self.criteria = criteria
         self.running = False
@@ -90,10 +93,15 @@ class AutoScoringSystem:
             self.filler.fill_score(0)
             return
 
-        score = self.scorer.grade_answer(filename, self.criteria)
+        # 评分：启用多模型交叉校验时，由校验器并行批改并裁决最终分数
+        if self.cross_checker is not None:
+            score = self.cross_checker.grade(filename, self.criteria)
+            response_info = self.cross_checker.get_last_adopted_response() or self.scorer.get_last_response()
+        else:
+            score = self.scorer.grade_answer(filename, self.criteria)
+            response_info = self.scorer.get_last_response()
 
         print(f"评分结果：{score}分")
-        response_info = self.scorer.get_last_response()
         if response_info:
             if question_index is None:
                 print(f"当前题目评分：{score}分")

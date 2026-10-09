@@ -17,7 +17,7 @@ from modules.自动评分模块 import call_llm_text
 class ScoringRecord:
     """单次评分记录"""
 
-    def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None, error_reason=""):
+    def __init__(self, index, ai_score, ai_response, criteria="", image_path="", manual_score=None, error_reason="", cross_check=""):
         self.index = index
         self.ai_score = ai_score
         self.ai_response = ai_response
@@ -25,6 +25,7 @@ class ScoringRecord:
         self.image_path = image_path
         self.manual_score = manual_score
         self.error_reason = error_reason
+        self.cross_check = cross_check
 
     @property
     def status(self):

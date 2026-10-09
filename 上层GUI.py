@@ -13,7 +13,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -454,10 +454,21 @@ class App(tk.Tk):
         self.batch_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="批量模式", variable=self.batch_var, command=self._sync_batch_state).grid(row=0, column=0, sticky="w")
 
-        ttk.Label(mid, text="总份数(可选)").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Label(mid, text="起始序号").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.start_index_var = tk.StringVar(value="1")
+        self.start_index_entry = ttk.Entry(mid, textvariable=self.start_index_var, width=8, state="disabled")
+        self.start_index_entry.grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        ttk.Label(mid, text="总份数(可选)").grid(row=0, column=3, sticky="w", padx=(12, 0))
         self.total_var = tk.StringVar(value="0")
         self.total_entry = ttk.Entry(mid, textvariable=self.total_var, width=10, state="disabled")
-        self.total_entry.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        self.total_entry.grid(row=0, column=4, sticky="w", padx=(6, 0))
+
+        ttk.Label(
+            mid,
+            text="中途接续：起始序号填本次第一份的编号（如从第 41 份接着改就填 41）",
+            foreground="#777777",
+        ).grid(row=0, column=5, sticky="w", padx=(8, 0))
 
         ttk.Label(mid, text="空白阈值").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.blank_threshold_var = tk.DoubleVar(value=15.0)
@@ -1588,7 +1599,9 @@ class App(tk.Tk):
         self.ap_status_var.set(f"默认模型：{model}（点「保存配置」生效）")
 
     def _sync_batch_state(self):
-        self.total_entry.configure(state=("normal" if self.batch_var.get() else "disabled"))
+        _state = "normal" if self.batch_var.get() else "disabled"
+        self.total_entry.configure(state=_state)
+        self.start_index_entry.configure(state=_state)
         if hasattr(self, "start_btn"):
             text = "开始批量阅卷" if self.batch_var.get() else "开始单题阅卷"
             self.start_btn.configure(text=text)
@@ -1603,6 +1616,15 @@ class App(tk.Tk):
     def _get_select_all_method(self) -> str:
         label = self.select_all_method_var.get()
         return self._SELECT_ALL_LABEL_MAP.get(label, "triple_click")
+
+    def _get_start_index(self) -> int:
+        """本次批量任务的起始序号（中途接续用）；非法值回退为 1。"""
+        try:
+            raw = str(self.start_index_var.get()).strip()
+            value = int(float(raw)) if raw else 1
+        except (TypeError, ValueError, tk.TclError):
+            return 1
+        return max(1, value)
 
     def _get_blank_threshold(self) -> float:
         try:
@@ -2124,6 +2146,7 @@ class App(tk.Tk):
             "criteria": self.criteria_text.get("1.0", "end").strip(),
             "batch_mode": bool(self.batch_var.get()),
             "total_questions": self.total_var.get(),
+            "start_index": self.start_index_var.get(),
             "blank_threshold": self._get_blank_threshold(),
             "filler_mode": "pyautogui",
             "select_all_method": self._get_select_all_method(),
@@ -2269,6 +2292,9 @@ class App(tk.Tk):
         if "total_questions" in cfg:
             self.total_var.set(str(cfg["total_questions"]))
 
+        if "start_index" in cfg:
+            self.start_index_var.set(str(cfg["start_index"]))
+
         if "blank_threshold" in cfg:
             try:
                 self._set_blank_threshold(float(cfg["blank_threshold"]))
@@ -2390,6 +2416,7 @@ class App(tk.Tk):
                     self.system.total_questions = int(self.total_var.get() or "0")
                 except ValueError:
                     self.system.total_questions = 0
+                self.system.start_index = self._get_start_index()
             return self.system
 
         api_key = (self.api_key_var.get() or "").strip()
@@ -2473,6 +2500,7 @@ class App(tk.Tk):
                 self.system.total_questions = int(self.total_var.get() or "0")
             except ValueError:
                 self.system.total_questions = 0
+            self.system.start_index = self._get_start_index()
 
         return self.system
 
@@ -2736,6 +2764,7 @@ class App(tk.Tk):
         if var is None or sys_ is None or not sys_.batch_mode:
             return
         processed = int(sys_.question_count or 0)
+        start_index = int(getattr(sys_, "start_index", 1) or 1)
         started = self._run_started_at
         if started is None or processed <= 0:
             var.set("预计完成：正在估算…")
@@ -2744,10 +2773,13 @@ class App(tk.Tk):
         avg_text = self._format_duration(avg)
         total = int(sys_.total_questions or 0)
         if total > 0:
-            remaining = max(0.0, (total - processed) * avg)
+            # 剩余份数按全局序号计算：下一份编号 = 起始序号 + 已处理份数
+            remaining_count = max(0, total - (start_index + processed) + 1)
+            remaining = remaining_count * avg
             eta_clock = time.strftime("%H:%M:%S", time.localtime(time.time() + remaining))
             var.set(
-                f"平均用时 {avg_text}/份 · 预计剩余 {self._format_duration(remaining)} · 预计完成 {eta_clock}"
+                f"平均用时 {avg_text}/份 · 本次 {start_index}~{total} 号 · 待处理 {remaining_count} 份"
+                f" · 预计剩余 {self._format_duration(remaining)} · 预计完成 {eta_clock}"
             )
         else:
             var.set(f"平均用时 {avg_text}/份（未设定总份数，无法预估完成时刻）")
@@ -2760,7 +2792,9 @@ class App(tk.Tk):
         if sys_.thread and sys_.thread.is_alive():
             if sys_.batch_mode:
                 if sys_.total_questions > 0:
-                    self.progress_var.set(f"批量中：{sys_.question_count}/{sys_.total_questions}")
+                    start_index = int(getattr(sys_, "start_index", 1) or 1)
+                    current_index = start_index + int(sys_.question_count or 0)
+                    self.progress_var.set(f"批量中：第 {current_index}/{sys_.total_questions} 号")
                 else:
                     self.progress_var.set(f"批量中：已处理 {sys_.question_count} 份")
             else:

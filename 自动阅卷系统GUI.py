@@ -69,6 +69,9 @@ class AutoScoringSystem:
         self.batch_mode = batch_mode
         self.question_count = 0
         self.total_questions = 0
+        # 本次批量任务的起始序号：中途接续时与改卷系统的卷子编号对齐
+        # （例如从第 41 份开始改，start_index=41，则第一份的题号为 41）
+        self.start_index = 1
         self.capture_dir = Path(capture_dir) if capture_dir else Path(__file__).with_name("captures")
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         self.on_score_callback = on_score_callback
@@ -176,16 +179,26 @@ class AutoScoringSystem:
 
         while self.running:
             try:
-                # 检查是否已达到设定份数
-                if self.total_questions > 0 and self.question_count >= self.total_questions:
-                    print(f"已完成 {self.question_count} 份，达到设定数量，停止运行")
-                    self._notify("任务完成", f"批量阅卷完成，共处理 {self.question_count} 份。")
+                # 本次要处理的卷子序号 = 起始序号 + 已处理份数（中途接续时与改卷系统对齐）
+                start_index = int(getattr(self, "start_index", 1) or 1)
+                current_index = start_index + self.question_count
+                # 检查是否已达到设定份数：全局序号超过总份数则停止
+                if self.total_questions > 0 and current_index > self.total_questions:
+                    print(
+                        f"已处理至第 {current_index - 1} 号（本次共 {self.question_count} 份），"
+                        "达到设定份数，停止运行"
+                    )
+                    self._notify(
+                        "任务完成",
+                        f"批量阅卷完成，本次处理 {self.question_count} 份"
+                        f"（第 {start_index} ~ {current_index - 1} 号）。",
+                    )
                     break
-                self._process_one_question(self.question_count + 1)
+                self._process_one_question(current_index)
                 self.question_count += 1
                 if self.total_questions > 0:
-                    progress = (self.question_count / self.total_questions) * 100
-                    print(f"进度：{progress:.1f}% ({self.question_count}/{self.total_questions})")
+                    progress = (current_index / self.total_questions) * 100
+                    print(f"进度：{progress:.1f}%（第 {current_index}/{self.total_questions} 号）")
                 time.sleep(2)
             except KeyboardInterrupt:
                 self.running = False

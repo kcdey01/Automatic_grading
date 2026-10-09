@@ -11,7 +11,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.8.1"
+__version__ = "1.9.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -31,12 +31,19 @@ from PIL import Image, ImageTk
 from 自动阅卷系统GUI import AutoScoringSystem, check_dependencies
 from modules.自动截图模块 import format_tk_geometry, get_virtual_screen_geometry
 from modules.自动评分模块 import (
+    API_MAX_RETRIES,
+    API_RETRIES_MAX,
+    API_RETRIES_MIN,
+    API_TIMEOUT_MAX,
+    API_TIMEOUT_MIN,
     API_TIMEOUT_SECONDS,
     OpenAICompatibleScorer,
     ZhipuAIScorer,
     BaiduScorer,
     XunfeiScorer,
+    configure_request_policy,
     fetch_openai_compatible_models,
+    get_request_policy,
 )
 from modules.多模型校验模块 import MultiModelCrossChecker
 from modules.系统通知模块 import send_windows_notification
@@ -118,6 +125,7 @@ class App(tk.Tk):
         self._build_ui()
         self._load_config(silent=True)
         self._ensure_default_profile()
+        self._apply_request_policy()  # 超时/重试：配置文件缺失时也保证策略生效
         self._sync_batch_state()
         self._update_ready_status()
         self._load_score_history()
@@ -279,13 +287,13 @@ class App(tk.Tk):
         # 第 2 行：当前连接摘要
         ttk.Label(top, text="当前连接").grid(row=2, column=0, sticky="w")
         self.conn_summary_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.conn_summary_var, foreground="#444444", wraplength=620, justify="left").grid(
+        ttk.Label(top, textvariable=self.conn_summary_var, foreground="#444444", wraplength=760, justify="left").grid(
             row=2, column=1, columnspan=3, sticky="w", padx=(6, 0)
         )
 
         ttk.Label(
             top,
-            text="提示：接口、密钥与模型列表在「API 配置」选项卡中维护；主界面直接选择配置好的供应商与模型即可。",
+            text="提示：接口、密钥、模型列表与「请求设置（超时/重试）」都在「API 配置」选项卡中维护；主界面直接选择配置好的供应商与模型即可。",
             foreground="#777777",
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
@@ -516,17 +524,20 @@ class App(tk.Tk):
     }
 
     def _build_api_tab(self, parent):
-        """构建「API 配置」选项卡：左侧已保存配置列表，右侧配置详情表单。"""
+        """构建「API 配置」选项卡：左侧配置列表 + 请求设置，右侧配置详情表单。"""
         wrap = ttk.Frame(parent)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # ── 左侧：配置列表 ──
-        left = ttk.LabelFrame(wrap, text="已保存的接口配置")
-        left.pack(side=tk.LEFT, fill=tk.Y)
+        left_col = ttk.Frame(wrap)
+        left_col.pack(side=tk.LEFT, fill=tk.Y)
+
+        # ── 左侧上：配置列表 ──
+        left = ttk.LabelFrame(left_col, text="已保存的接口配置")
+        left.pack(fill=tk.BOTH, expand=True)
 
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 0))
-        self.api_profile_tree = ttk.Treeview(tree_frame, columns=("名称", "服务商"), show="headings", height=16)
+        self.api_profile_tree = ttk.Treeview(tree_frame, columns=("名称", "服务商"), show="headings", height=12)
         self.api_profile_tree.heading("名称", text="名称")
         self.api_profile_tree.heading("服务商", text="服务商")
         self.api_profile_tree.column("名称", width=180, anchor="w")
@@ -544,6 +555,59 @@ class App(tk.Tk):
         ttk.Button(list_btns, text="复制", width=6, command=self._ap_duplicate_profile).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(list_btns, text="删除", width=6, command=self._ap_delete_profile).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(left, text="设为当前使用", command=self._ap_apply_active).pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        # ── 左侧下：请求设置（全局超时 / 失败重试次数） ──
+        policy_frame = ttk.LabelFrame(left_col, text="请求设置（全局）")
+        policy_frame.pack(fill=tk.X, pady=(8, 0))
+
+        policy_grid = ttk.Frame(policy_frame)
+        policy_grid.pack(fill=tk.X, padx=8, pady=(6, 0))
+
+        ttk.Label(policy_grid, text="响应超时(秒)").grid(row=0, column=0, sticky="w")
+        self.request_timeout_var = tk.StringVar(value=str(API_TIMEOUT_SECONDS))
+        self.request_timeout_spin = ttk.Spinbox(
+            policy_grid,
+            from_=API_TIMEOUT_MIN,
+            to=API_TIMEOUT_MAX,
+            increment=5,
+            width=6,
+            textvariable=self.request_timeout_var,
+            command=self._on_request_policy_change,
+        )
+        self.request_timeout_spin.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.request_timeout_spin.bind("<Return>", self._on_request_policy_change)
+        self.request_timeout_spin.bind("<FocusOut>", self._on_request_policy_change)
+        ttk.Label(policy_grid, text=f"{API_TIMEOUT_MIN}~{API_TIMEOUT_MAX}").grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        ttk.Label(policy_grid, text="失败重试次数").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.request_max_retries_var = tk.StringVar(value=str(API_MAX_RETRIES))
+        self.request_max_retries_spin = ttk.Spinbox(
+            policy_grid,
+            from_=API_RETRIES_MIN,
+            to=API_RETRIES_MAX,
+            increment=1,
+            width=6,
+            textvariable=self.request_max_retries_var,
+            command=self._on_request_policy_change,
+        )
+        self.request_max_retries_spin.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        self.request_max_retries_spin.bind("<Return>", self._on_request_policy_change)
+        self.request_max_retries_spin.bind("<FocusOut>", self._on_request_policy_change)
+        ttk.Label(policy_grid, text="0=不重试").grid(row=1, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
+
+        self.request_policy_status_var = tk.StringVar(
+            value=f"已生效：超时 {API_TIMEOUT_SECONDS}s · 重试 {API_MAX_RETRIES} 次"
+        )
+        ttk.Label(
+            policy_frame, textvariable=self.request_policy_status_var, foreground="#666666", wraplength=250
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Label(
+            policy_frame,
+            text="重试次数不含首次请求；对所有接口配置生效，修改后立即保存",
+            foreground="#777777",
+            wraplength=250,
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(2, 8))
 
         # ── 右侧：配置详情 ──
         right = ttk.LabelFrame(wrap, text="配置详情（修改后点「保存配置」写入 config.json）")
@@ -719,6 +783,8 @@ class App(tk.Tk):
         return f"{text[:4]}****{text[-4:]}"
 
     def _describe_connection(self) -> str:
+        policy = get_request_policy()
+        policy_text = f" | 超时 {policy['timeout_seconds']}s · 重试 {policy['max_retries']} 次"
         provider = self.provider_var.get()
         if provider in self._SPECIAL_PROVIDERS:
             key_format = {
@@ -726,11 +792,54 @@ class App(tk.Tk):
                 "百度千帆": "API_Key:Secret_Key",
                 "科大讯飞": "appId:apiKey:apiSecret",
             }.get(provider, "专用接口")
-            return f"{provider}（专用接口，API Key 格式：{key_format}）"
+            return f"{provider}（专用接口，API Key 格式：{key_format}）{policy_text}"
         base_url = (self.base_url_var.get() or "").strip() or "（默认地址）"
         return (
             f"{provider} | {base_url} | Key {self._mask_secret(self.api_key_var.get())}"
             f" | 接口类型 {self.api_type_var.get()} | 思考模式 {self.thinking_mode_var.get()}"
+            f"{policy_text}"
+        )
+
+    # ── 请求设置（全局超时 / 失败重试次数） ──
+
+    def _get_request_timeout(self) -> int:
+        try:
+            value = int(round(float(self.request_timeout_var.get())))
+        except (TypeError, ValueError, tk.TclError):
+            value = API_TIMEOUT_SECONDS
+        return max(API_TIMEOUT_MIN, min(API_TIMEOUT_MAX, value))
+
+    def _get_request_max_retries(self) -> int:
+        try:
+            value = int(round(float(self.request_max_retries_var.get())))
+        except (TypeError, ValueError, tk.TclError):
+            value = API_MAX_RETRIES
+        return max(API_RETRIES_MIN, min(API_RETRIES_MAX, value))
+
+    def _apply_request_policy(self, save: bool = False) -> dict:
+        """把界面上的请求设置写入运行时策略（可选持久化）。"""
+        policy = configure_request_policy(
+            timeout_seconds=self._get_request_timeout(),
+            max_retries=self._get_request_max_retries(),
+        )
+        # 回写规范化后的值（越界输入会被截断，避免界面与生效值不一致）
+        self.request_timeout_var.set(str(policy["timeout_seconds"]))
+        self.request_max_retries_var.set(str(policy["max_retries"]))
+        if hasattr(self, "request_policy_status_var"):
+            self.request_policy_status_var.set(
+                f"已生效：超时 {policy['timeout_seconds']}s · 重试 {policy['max_retries']} 次"
+            )
+        self._sync_provider_state()
+        if save:
+            self._save_config(silent=True)
+        return policy
+
+    def _on_request_policy_change(self, event=None):
+        """超时/重试次数变化：立即生效并持久化到 config.json。"""
+        policy = self._apply_request_policy(save=True)
+        print(
+            f"[请求设置] 响应超时 {policy['timeout_seconds']} 秒 · 失败重试 {policy['max_retries']} 次"
+            f"（重试不含首次请求）"
         )
 
     def _ensure_default_profile(self):
@@ -1089,8 +1198,12 @@ class App(tk.Tk):
                 messagebox.showerror("配置错误", f"额外请求头JSON解析失败：{e}")
                 return
 
+        policy = get_request_policy()
         self.ap_fetch_btn.configure(state="disabled", text="获取中…")
-        print(f"[API 配置] 正在获取模型列表：{base_url}")
+        print(
+            f"[API 配置] 正在获取模型列表：{base_url}"
+            f"（超时 {policy['timeout_seconds']}s · 重试 {policy['max_retries']} 次）"
+        )
 
         def _do_fetch():
             try:
@@ -1098,7 +1211,7 @@ class App(tk.Tk):
                     base_url=base_url,
                     api_key=api_key,
                     extra_headers=extra_headers,
-                    timeout=API_TIMEOUT_SECONDS,
+                    timeout=None,  # 使用全局请求设置
                 )
                 self.after(0, self._ap_fetch_done, models)
             except Exception as e:
@@ -1556,8 +1669,12 @@ class App(tk.Tk):
                 messagebox.showerror("配置错误", f"额外请求头JSON解析失败：{e}")
                 return
 
+        policy = get_request_policy()
         self.fetch_models_btn.configure(state="disabled", text="获取中…")
-        print(f"[模型列表] 正在获取 {provider} 模型列表：{base_url}")
+        print(
+            f"[模型列表] 正在获取 {provider} 模型列表：{base_url}"
+            f"（超时 {policy['timeout_seconds']}s · 重试 {policy['max_retries']} 次）"
+        )
 
         def _do_fetch():
             try:
@@ -1565,7 +1682,7 @@ class App(tk.Tk):
                     base_url=base_url,
                     api_key=api_key,
                     extra_headers=extra_headers,
-                    timeout=API_TIMEOUT_SECONDS,
+                    timeout=None,  # 使用全局请求设置
                 )
                 self.after(0, self._fetch_models_done, models)
             except Exception as e:
@@ -1699,6 +1816,8 @@ class App(tk.Tk):
             "api_type": self.api_type_var.get(),
             "api_profiles": [dict(p) for p in self._api_profiles],
             "active_profile": self._active_profile_var.get(),
+            "request_timeout_seconds": self._get_request_timeout(),
+            "request_max_retries": self._get_request_max_retries(),
             "criteria": self.criteria_text.get("1.0", "end").strip(),
             "batch_mode": bool(self.batch_var.get()),
             "total_questions": self.total_var.get(),
@@ -1829,6 +1948,11 @@ class App(tk.Tk):
             # 顶层 model 优先（保持旧配置文件的“当前模型”语义）
             self.model_var.set(str(cfg["model"]))
         self._refresh_profile_choices()
+
+        # ── 请求设置（全局超时 / 失败重试次数） ──
+        self.request_timeout_var.set(str(cfg.get("request_timeout_seconds", API_TIMEOUT_SECONDS)))
+        self.request_max_retries_var.set(str(cfg.get("request_max_retries", API_MAX_RETRIES)))
+        self._apply_request_policy()
 
         if "criteria" in cfg:
             self.criteria_text.delete("1.0", "end")
@@ -2438,26 +2562,17 @@ class App(tk.Tk):
 
             # 复用现有评分器发送请求（已验证的工作路径，兼容所有服务商）
             sys_ = self._ensure_system()
-            # 统一超时 60s（如需调整见 modules/自动评分模块.py 的 API_TIMEOUT_SECONDS）
-            if hasattr(sys_.scorer, "timeout"):
-                sys_.scorer.timeout = API_TIMEOUT_SECONDS
+            policy = get_request_policy()
+            print(
+                f"[生成评分标准] 请求设置：超时 {policy['timeout_seconds']} 秒 · 最多重试 {policy['max_retries']} 次"
+                "（可在「API 配置 → 请求设置」中调整）"
+            )
             # 打印诊断信息
             if hasattr(sys_.scorer, "base_url"):
                 print(f"[生成评分标准] 请求 URL 基础路径: {sys_.scorer.base_url}")
 
-            # 带重试的评分调用（最多重试 1 次）
-            last_err = None
-            for attempt in range(2):
-                try:
-                    sys_.scorer.grade_answer(temp_path, prompt)
-                    break
-                except Exception as retry_err:
-                    last_err = retry_err
-                    if attempt < 1:
-                        print(f"[生成评分标准] 第 {attempt+1} 次失败，2 秒后重试（仅重试 1 次）: {retry_err}")
-                        time.sleep(2)
-                    else:
-                        raise last_err
+            # 调用评分器生成（超时与重试次数统一由全局请求设置控制，这里不再叠加重试）
+            sys_.scorer.grade_answer(temp_path, prompt)
 
             info = sys_.scorer.get_last_response()
             if not info or not info.get("full_response", "").strip():
@@ -3209,7 +3324,7 @@ class App(tk.Tk):
                     model=model,
                     prompt=prompt,
                     extra_headers=extra_headers,
-                    timeout=API_TIMEOUT_SECONDS,
+                    timeout=None,  # 使用全局请求设置（超时/重试）
                     api_type=self._resolve_api_type(),
                 )
                 self.after(0, self._optimize_done, result)

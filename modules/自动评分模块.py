@@ -19,12 +19,47 @@ _THINKING_MODEL_KEYWORDS = ["mimo", "qwen3", "deepseek-r1", "qwq", "thinking"]
 # 明确禁用思考模式时使用的模型名标记
 _THINKING_OFF_MARKERS = ["no-think", "nothink", "thinking-off", "non-thinking"]
 
-# API 单次响应超时（秒）
-API_TIMEOUT_SECONDS = 60
+# ── 全局请求策略（超时 / 失败重试次数） ──────────────────────────────
+# 下面的常量只是默认值；运行时可用 configure_request_policy() 修改，
+# 上层 GUI 的「API 配置 → 请求设置」即调用它，并随 config.json 持久化。
+API_TIMEOUT_SECONDS = 60      # 默认单次请求超时（秒）
+API_MAX_RETRIES = 1           # 默认失败重试次数（不含首次请求）
+API_TIMEOUT_MIN, API_TIMEOUT_MAX = 5, 600
+API_RETRIES_MIN, API_RETRIES_MAX = 0, 5
 
-# 超时/连接失败时的重试策略：最多重试 1 次（首次 + 1 次重试 = 共 2 次尝试）
-_API_MAX_ATTEMPTS = 2
+_REQUEST_POLICY = {
+    "timeout_seconds": API_TIMEOUT_SECONDS,
+    "max_retries": API_MAX_RETRIES,
+}
+
+# 重试间隔基数（第 1 次重试等待 1s，第 2 次 2s……）
 _API_RETRY_BACKOFF_SECONDS = 1.0
+
+
+def configure_request_policy(timeout_seconds=None, max_retries=None) -> dict:
+    """设置全局 API 请求策略，返回生效后的完整策略。
+
+    :param timeout_seconds: 单次请求超时秒数（5~600）；None 表示不修改
+    :param max_retries: 失败重试次数（0~5，不含首次请求）；None 表示不修改
+    """
+    if timeout_seconds is not None:
+        try:
+            seconds = int(round(float(timeout_seconds)))
+        except (TypeError, ValueError):
+            seconds = API_TIMEOUT_SECONDS
+        _REQUEST_POLICY["timeout_seconds"] = max(API_TIMEOUT_MIN, min(API_TIMEOUT_MAX, seconds))
+    if max_retries is not None:
+        try:
+            retries = int(round(float(max_retries)))
+        except (TypeError, ValueError):
+            retries = API_MAX_RETRIES
+        _REQUEST_POLICY["max_retries"] = max(API_RETRIES_MIN, min(API_RETRIES_MAX, retries))
+    return get_request_policy()
+
+
+def get_request_policy() -> dict:
+    """读取当前全局请求策略（``timeout_seconds`` / ``max_retries``）。"""
+    return dict(_REQUEST_POLICY)
 
 # 服务端拒绝 thinking 参数时返回的错误特征串（小写匹配）
 _UNSUPPORTED_THINKING_MARKERS = [
@@ -180,17 +215,24 @@ def _build_auth_headers(
 
 
 def _request_with_retries(method: str, url: str, **kwargs) -> requests.Response:
-    """对 API 超时和临时网络错误进行有限重试（最多重试 1 次）。"""
+    """对 API 超时和临时网络错误进行有限重试（超时与次数由全局请求策略控制）。
+
+    ``timeout`` 未显式指定时使用当前策略中的超时值；重试次数同样实时读取策略，
+    因此界面上的「请求设置」改完立即生效。
+    """
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = int(_REQUEST_POLICY["timeout_seconds"])
+    max_attempts = int(_REQUEST_POLICY["max_retries"]) + 1
     last_error = None
-    for attempt in range(1, _API_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             return requests.request(method, url, **kwargs)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             last_error = e
-            if attempt >= _API_MAX_ATTEMPTS:
+            if attempt >= max_attempts:
                 break
             wait_seconds = _API_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-            print(f"[API重试] 第 {attempt} 次请求失败：{e}，{wait_seconds:.1f} 秒后重试（仅重试 1 次）")
+            print(f"[API重试] 第 {attempt} 次请求失败：{e}，{wait_seconds:.1f} 秒后重试（最多重试 {max_attempts - 1} 次）")
             time.sleep(wait_seconds)
     raise last_error
 
@@ -199,9 +241,12 @@ def fetch_openai_compatible_models(
     base_url: str,
     api_key: str,
     extra_headers: Mapping[str, str] | None = None,
-    timeout: int = API_TIMEOUT_SECONDS,
+    timeout: int | None = None,
 ) -> list[str]:
-    """从 OpenAI 兼容接口读取 /models，返回模型 id 列表。"""
+    """从 OpenAI 兼容接口读取 /models，返回模型 id 列表。
+
+    ``timeout`` 为 None 时使用全局请求策略中的超时值。
+    """
     base_url = (base_url or "").strip().rstrip("/")
     if not base_url:
         raise ValueError("base_url 不能为空")
@@ -239,12 +284,13 @@ def fetch_openai_compatible_models(
 
 def call_llm_text(
   base_url: str, api_key: str, model: str, prompt: str,
-  extra_headers: dict | None = None, timeout: int = API_TIMEOUT_SECONDS,
+  extra_headers: dict | None = None, timeout: int | None = None,
   api_type: str | None = None,
 ) -> str:
     """
     通用文本 LLM 调用，自动适配标准 OpenAI Chat Completions 和 Responses API（火山引擎）。
     ``api_type`` 可显式指定接口类型（auto/chat/responses），为空时按域名自动判断。
+    ``timeout`` 为 None 时使用全局请求策略中的超时值。
     返回 AI 回复文本。
     """
     base_url = (base_url or "").strip().rstrip("/")
@@ -505,11 +551,13 @@ class OpenAICompatibleScorer(BaseScorer):
         api_key: str,
         model: str,
         extra_headers=None,
-        timeout=API_TIMEOUT_SECONDS,
+        timeout: int | None = None,
         enable_thinking: bool | None = None,
         api_type: str | None = None,
     ):
         """
+        :param timeout:
+            None 表示使用全局请求策略中的超时值（界面「API 配置 → 请求设置」可改）。
         :param enable_thinking:
             - ``True``  强制发送 thinking 参数
             - ``False`` 永不发送（部分 OpenAI 兼容网关会因未知参数返回 400）
@@ -727,7 +775,8 @@ class BaiduScorer(BaseScorer):
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             },
-            timeout=API_TIMEOUT_SECONDS,
+            # timeout 交给全局请求策略（GUI「API 配置 → 请求设置」可调）
+            timeout=None,
         )
         resp.raise_for_status()
         return resp.json()["access_token"]
@@ -752,7 +801,7 @@ class BaiduScorer(BaseScorer):
             ],
         }
 
-        resp = _request_with_retries("POST", url, json=payload, timeout=API_TIMEOUT_SECONDS)
+        resp = _request_with_retries("POST", url, json=payload, timeout=None)
         resp.raise_for_status()
         data = resp.json()
         # 百度千帆的响应 key 是 "result"
@@ -831,7 +880,7 @@ class XunfeiScorer(BaseScorer):
             "Authorization": authorization,
         }
 
-        resp = _request_with_retries("POST", self._base_url, json=payload, headers=headers, timeout=API_TIMEOUT_SECONDS)
+        resp = _request_with_retries("POST", self._base_url, json=payload, headers=headers, timeout=None)
         resp.raise_for_status()
         data = resp.json()
 

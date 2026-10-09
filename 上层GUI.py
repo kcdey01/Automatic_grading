@@ -11,7 +11,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -71,6 +71,125 @@ class _QueueStdout:
         pass
 
 
+def _theme_bg(widget) -> str:
+    """推断 ttk 主题的默认背景色，用于让自绘卡片与整体界面协调。"""
+    try:
+        bg = ttk.Style(widget).lookup("TFrame", "background")
+        if bg:
+            return str(bg)
+    except tk.TclError:
+        pass
+    try:
+        return str(widget.cget("bg"))
+    except tk.TclError:
+        return "#f0f0f0"
+
+
+class CollapsibleFrame(tk.Frame):
+    """可折叠的模块卡片：点击标题栏展开/收起内容，箭头指示当前状态。
+
+    约定：
+    - 内容请放进 `frame.body`（一个普通的 tk.Frame 容器）。
+    - `name` 为持久化标识，配合上层窗口保存/恢复折叠状态。
+    - `on_toggle(name, collapsed)` 在用户点击标题栏时回调。
+    """
+
+    _BG_HEADER = "#e8eef7"
+    _BG_HEADER_HOVER = "#d8e3f3"
+    _FG_TITLE = "#1f2d3d"
+    _FG_ARROW = "#3a4a5f"
+    _BORDER = "#c2cee0"
+
+    def __init__(
+        self,
+        parent,
+        title: str = "",
+        *,
+        name: str | None = None,
+        collapsed: bool = False,
+        on_toggle: Callable[[str, bool], None] | None = None,
+        bg: str | None = None,
+        **kwargs,
+    ):
+        base_bg = bg or _theme_bg(parent)
+        super().__init__(
+            parent,
+            bg=base_bg,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self._BORDER,
+            highlightcolor=self._BORDER,
+            **kwargs,
+        )
+        self.section_name = name
+        self._collapsed = bool(collapsed)
+        self._on_toggle_cb = on_toggle
+
+        self._header = tk.Frame(self, bg=self._BG_HEADER, cursor="hand2")
+        self._header.pack(side=tk.TOP, fill=tk.X)
+
+        self._arrow = tk.Label(
+            self._header,
+            text="",
+            bg=self._BG_HEADER,
+            fg=self._FG_ARROW,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+        )
+        self._arrow.pack(side=tk.LEFT, padx=(8, 2), pady=5)
+
+        self._title = tk.Label(
+            self._header,
+            text=title,
+            bg=self._BG_HEADER,
+            fg=self._FG_TITLE,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+            justify="left",
+            cursor="hand2",
+        )
+        self._title.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=5, padx=(0, 8))
+
+        self.body = tk.Frame(self, bg=base_bg)
+
+        for w in (self._header, self._arrow, self._title):
+            w.bind("<Button-1>", self._toggle_event)
+            w.bind("<Enter>", self._on_enter)
+            w.bind("<Leave>", self._on_leave)
+
+        self.set_collapsed(self._collapsed, notify=False)
+
+    # ── 内部样式 ──
+    def _paint_header(self, bg: str):
+        for w in (self._header, self._arrow, self._title):
+            w.configure(bg=bg)
+
+    def _on_enter(self, _event=None):
+        self._paint_header(self._BG_HEADER_HOVER)
+
+    def _on_leave(self, _event=None):
+        self._paint_header(self._BG_HEADER)
+
+    def _toggle_event(self, _event=None):
+        self.set_collapsed(not self._collapsed)
+
+    # ── 公共接口 ──
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool, notify: bool = True):
+        self._collapsed = bool(collapsed)
+        if self._collapsed:
+            self.body.pack_forget()
+            self._arrow.configure(text="\u25b6")  # ▶
+        else:
+            self.body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._arrow.configure(text="\u25bc")  # ▼
+        if notify and self._on_toggle_cb is not None:
+            self._on_toggle_cb(self.section_name or "", self._collapsed)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -120,6 +239,10 @@ class App(tk.Tk):
         self._tune_preview_image_ref = None
         self._tune_preview_item = None
         self._tune_preview_last_xy = (0, 0)
+
+        # 可折叠模块（界面优化）：name -> CollapsibleFrame，配合折叠状态持久化
+        self._sections: dict[str, CollapsibleFrame] = {}
+        self._ui_section_state: dict[str, bool] = {}
 
         self._build_menu()
         self._build_ui()
@@ -198,8 +321,19 @@ class App(tk.Tk):
         api_tab = ttk.Frame(self._notebook)
         self._notebook.add(api_tab, text="  API 配置  ")
 
+        # ── 顶部工具栏：模块折叠控制（始终可见，不随内容滚动） ──
+        toolbar = ttk.Frame(main_tab)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(toolbar, text="模块：").pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="全部展开", width=9, command=self._expand_all_sections).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text="全部折叠", width=9, command=self._collapse_all_sections).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(toolbar, text="点击各模块标题栏可单独展开 / 收起", foreground="#777777").pack(side=tk.LEFT, padx=(10, 0))
+
         # ── 可滚动容器（主界面） ──
-        self._canvas = tk.Canvas(main_tab, highlightthickness=0)
+        scroll_host = ttk.Frame(main_tab)
+        scroll_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self._canvas = tk.Canvas(scroll_host, highlightthickness=0)
         def _scroll_canvas(*args: str) -> None:
             self._canvas.tk.call(str(self._canvas), "yview", *args)
 
@@ -209,7 +343,7 @@ class App(tk.Tk):
 
             return _scroll_text
 
-        scrollbar = ttk.Scrollbar(main_tab, orient="vertical", command=_scroll_canvas)
+        scrollbar = ttk.Scrollbar(scroll_host, orient="vertical", command=_scroll_canvas)
         self._canvas.configure(yscrollcommand=scrollbar.set)
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -248,11 +382,29 @@ class App(tk.Tk):
             self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
         self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        top = ttk.Frame(inner)
+        # ── 可折叠模块工厂（界面优化） ──
+        base_bg = _theme_bg(self)
+
+        def _make_section(name: str, title: str, *, collapsed: bool = False,
+                          fill: str = tk.X, expand: bool = False) -> CollapsibleFrame:
+            sec = CollapsibleFrame(
+                inner,
+                title=title,
+                name=name,
+                collapsed=collapsed,
+                bg=base_bg,
+                on_toggle=self._on_section_toggle,
+            )
+            sec.pack(side=tk.TOP, fill=fill, expand=expand, padx=pad["padx"], pady=pad["pady"])
+            self._sections[name] = sec
+            return sec
+
+        sec_conn = _make_section("connection", "接口与模型（选择接口配置与模型后即可开始阅卷）")
+        top = ttk.Frame(sec_conn.body)
         # Avoid passing geometry options as a positional argument to pack
         # (some type checkers treat them as the first positional `cnf` arg).
         # Expand padding explicitly to satisfy strict type checkers.
-        top.pack(side="top", fill=tk.X, padx=pad.get("padx", 0), pady=pad.get("pady", 0))
+        top.pack(side="top", fill=tk.X, padx=8, pady=8)
 
         # 当前生效的连接参数（由「接口配置」自动填充，在「API 配置」选项卡维护）
         self.provider_var = tk.StringVar(value="OpenAI")
@@ -304,9 +456,8 @@ class App(tk.Tk):
         self.provider_var.trace_add("write", lambda name, index, mode: self._sync_provider_state())
         self._sync_provider_state()
 
-        criteria_frame = ttk.LabelFrame(inner, text="评分标准（直接粘贴你的阅卷要求/评分细则）")
-        criteria_frame.pack(fill=tk.BOTH, expand=False, padx=pad["padx"], pady=pad["pady"])
-        _criteria_inner = ttk.Frame(criteria_frame)
+        sec_criteria = _make_section("criteria", "评分标准（直接粘贴你的阅卷要求 / 评分细则）")
+        _criteria_inner = ttk.Frame(sec_criteria.body)
         _criteria_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.criteria_text = tk.Text(_criteria_inner, height=8, wrap="word")
         _criteria_sb = ttk.Scrollbar(_criteria_inner, command=_make_text_yview_command(self.criteria_text))
@@ -314,8 +465,9 @@ class App(tk.Tk):
         _criteria_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.criteria_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        mid = ttk.Frame(inner)
-        mid.pack(fill=tk.X, padx=pad["padx"], pady=pad["pady"])
+        sec_params = _make_section("params", "阅卷参数（批量模式 / 空白检测 / 准备状态）")
+        mid = ttk.Frame(sec_params.body)
+        mid.pack(fill=tk.X, padx=8, pady=8)
 
         self.batch_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="批量模式", variable=self.batch_var, command=self._sync_batch_state).grid(row=0, column=0, sticky="w")
@@ -346,8 +498,8 @@ class App(tk.Tk):
         ttk.Label(mid, textvariable=self.ready_status_var).grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
 
-        runbox = ttk.LabelFrame(inner, text="运行")
-        runbox.pack(fill=tk.X, **pad)
+        sec_run = _make_section("run", "运行（开始阅卷 / 停止 / 运行选项）")
+        runbox = sec_run.body
         self.start_btn = ttk.Button(runbox, text="开始单题阅卷", command=self._start)
         self.start_btn.grid(row=0, column=0, padx=8, pady=8, sticky="w")
         ttk.Button(runbox, text="停止", command=self._stop).grid(row=0, column=1, padx=8, pady=8, sticky="w")
@@ -378,14 +530,14 @@ class App(tk.Tk):
         ttk.Label(runbox, text="单题不提交/下一题；批量只点下一题不提交").grid(row=2, column=1, columnspan=3, padx=8, pady=(4, 8), sticky="w")
 
         # ── 多模型交叉校验 ──
-        crossbox = ttk.LabelFrame(
-            inner,
-            text="多模型交叉校验（主模型＋附加模型同题并行批改 → 分数比对 → 不一致时第三轮校验）",
+        sec_cross = _make_section(
+            "cross_check",
+            "多模型交叉校验（主模型＋附加模型同题并行批改 → 分数比对 → 不一致时第三轮校验）",
         )
-        crossbox.pack(fill=tk.X, **pad)
+        crossbox = sec_cross.body
 
         cross_head = ttk.Frame(crossbox)
-        cross_head.pack(fill=tk.X, padx=8, pady=(4, 0))
+        cross_head.pack(fill=tk.X, padx=8, pady=(8, 0))
 
         self.cross_check_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -430,11 +582,13 @@ class App(tk.Tk):
         self._sync_crosscheck_state()
 
         # ── AI 评分记录 ──
-        record_frame = ttk.LabelFrame(inner, text="AI 评分记录（双击记录查看截图与评分详情）")
-        record_frame.pack(fill=tk.BOTH, expand=False, **pad)
+        sec_records = _make_section(
+            "records", "AI 评分记录（双击记录查看截图与评分详情）", fill=tk.BOTH
+        )
+        record_frame = sec_records.body
 
         record_top = ttk.Frame(record_frame)
-        record_top.pack(fill=tk.X, padx=8, pady=(4, 0))
+        record_top.pack(fill=tk.X, padx=8, pady=(8, 0))
 
         tree_frame = ttk.Frame(record_top)
         tree_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -462,11 +616,13 @@ class App(tk.Tk):
         ttk.Button(record_bar, text="清空记录", command=self._clear_score_records).pack(side=tk.RIGHT, padx=(8, 0))
 
         # ── 快捷优化建议 ──
-        quick_frame = ttk.LabelFrame(inner, text="快捷优化建议（输入优化想法→AI分析→生成新评分标准）")
-        quick_frame.pack(fill=tk.X, **pad)
+        sec_quick = _make_section(
+            "quick_optimize", "快捷优化建议（输入优化想法 → AI 分析 → 生成新评分标准）"
+        )
+        quick_frame = sec_quick.body
 
         qf_top = ttk.Frame(quick_frame)
-        qf_top.pack(fill=tk.X, padx=8, pady=(4, 0))
+        qf_top.pack(fill=tk.X, padx=8, pady=(8, 0))
 
         ttk.Label(qf_top, text="优化建议：").pack(side=tk.LEFT)
         self.optimize_suggestion_text = tk.Text(qf_top, height=3, wrap="word")
@@ -490,8 +646,8 @@ class App(tk.Tk):
         self.optimize_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── 日志 ──
-        log_frame = ttk.LabelFrame(inner, text="运行日志 / AI返回（自动滚动）")
-        log_frame.pack(fill=tk.X, **pad)
+        sec_log = _make_section("log", "运行日志 / AI 返回（自动滚动）")
+        log_frame = sec_log.body
 
         self.log_text = tk.Text(log_frame, wrap="word", height=12)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
@@ -532,11 +688,19 @@ class App(tk.Tk):
         left_col.pack(side=tk.LEFT, fill=tk.Y)
 
         # ── 左侧上：配置列表 ──
-        left = ttk.LabelFrame(left_col, text="已保存的接口配置")
-        left.pack(fill=tk.BOTH, expand=True)
+        sec_profiles = CollapsibleFrame(
+            left_col,
+            title="已保存的接口配置",
+            name="api_profiles",
+            bg=_theme_bg(self),
+            on_toggle=self._on_section_toggle,
+        )
+        sec_profiles.pack(fill=tk.BOTH, expand=True)
+        self._sections["api_profiles"] = sec_profiles
+        left = sec_profiles.body
 
         tree_frame = ttk.Frame(left)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 0))
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 0))
         self.api_profile_tree = ttk.Treeview(tree_frame, columns=("名称", "服务商"), show="headings", height=12)
         self.api_profile_tree.heading("名称", text="名称")
         self.api_profile_tree.heading("服务商", text="服务商")
@@ -557,11 +721,19 @@ class App(tk.Tk):
         ttk.Button(left, text="设为当前使用", command=self._ap_apply_active).pack(fill=tk.X, padx=8, pady=(0, 8))
 
         # ── 左侧下：请求设置（全局超时 / 失败重试次数） ──
-        policy_frame = ttk.LabelFrame(left_col, text="请求设置（全局）")
-        policy_frame.pack(fill=tk.X, pady=(8, 0))
+        sec_policy = CollapsibleFrame(
+            left_col,
+            title="请求设置（全局）",
+            name="api_request_policy",
+            bg=_theme_bg(self),
+            on_toggle=self._on_section_toggle,
+        )
+        sec_policy.pack(fill=tk.X, pady=(8, 0))
+        self._sections["api_request_policy"] = sec_policy
+        policy_frame = sec_policy.body
 
         policy_grid = ttk.Frame(policy_frame)
-        policy_grid.pack(fill=tk.X, padx=8, pady=(6, 0))
+        policy_grid.pack(fill=tk.X, padx=8, pady=(8, 0))
 
         ttk.Label(policy_grid, text="响应超时(秒)").grid(row=0, column=0, sticky="w")
         self.request_timeout_var = tk.StringVar(value=str(API_TIMEOUT_SECONDS))
@@ -610,10 +782,17 @@ class App(tk.Tk):
         ).pack(anchor="w", padx=8, pady=(2, 8))
 
         # ── 右侧：配置详情 ──
-        right = ttk.LabelFrame(wrap, text="配置详情（修改后点「保存配置」写入 config.json）")
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        sec_detail = CollapsibleFrame(
+            wrap,
+            title="配置详情（修改后点「保存配置」写入 config.json）",
+            name="api_detail",
+            bg=_theme_bg(self),
+            on_toggle=self._on_section_toggle,
+        )
+        sec_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        self._sections["api_detail"] = sec_detail
 
-        form = ttk.Frame(right)
+        form = ttk.Frame(sec_detail.body)
         form.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
@@ -713,6 +892,63 @@ class App(tk.Tk):
         )
         self.ap_status_var = tk.StringVar(value="")
         ttk.Label(bottom, textvariable=self.ap_status_var, foreground="#666666").pack(side=tk.LEFT, padx=(12, 0))
+
+    # ── 可折叠模块控制 ──
+
+    def _refresh_scrollregion(self):
+        """折叠/展开后刷新主界面画布的滚动区域（避免残留空白或截断）。"""
+        def _apply():
+            try:
+                self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+            except tk.TclError:
+                pass
+
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        _apply()
+        try:
+            self.after_idle(_apply)
+        except tk.TclError:
+            pass
+
+    def _on_section_toggle(self, name: str, collapsed: bool):
+        """用户点击模块标题栏：记录状态并即时持久化到 config.json 的 ui_sections。"""
+        if not name:
+            return
+        self._ui_section_state[name] = bool(collapsed)
+        self._persist_ui_sections()
+        self._refresh_scrollregion()
+
+    def _persist_ui_sections(self):
+        """只把折叠状态合并写回 config.json，不影响其它字段（含未保存的编辑）。"""
+        try:
+            data: dict = {}
+            if self.config_path.exists():
+                try:
+                    loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except (OSError, json.JSONDecodeError):
+                    data = {}
+            data["ui_sections"] = dict(self._ui_section_state)
+            self.config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as e:
+            print(f"[界面] 保存模块折叠状态失败：{e}")
+
+    def _set_all_sections_collapsed(self, collapsed: bool):
+        for name, sec in self._sections.items():
+            sec.set_collapsed(collapsed, notify=False)
+            self._ui_section_state[name] = bool(collapsed)
+        self._persist_ui_sections()
+        self._refresh_scrollregion()
+
+    def _expand_all_sections(self):
+        self._set_all_sections_collapsed(False)
+
+    def _collapse_all_sections(self):
+        self._set_all_sections_collapsed(True)
 
     def _goto_api_tab(self):
         """切换到「API 配置」选项卡，并加载当前使用的配置。"""
@@ -1826,6 +2062,7 @@ class App(tk.Tk):
             "select_all_method": self._get_select_all_method(),
             "review_score_check_enabled": bool(self.review_score_check_var.get()),
             "cross_check": self._collect_cross_config(),
+            "ui_sections": dict(self._ui_section_state),
         }
         cfg.update(self._collect_runtime_config())
         return cfg
@@ -2021,6 +2258,16 @@ class App(tk.Tk):
         for key in ("screenshot_region_norm", "score_input_pos", "submit_btn_pos", "next_btn_pos"):
             if key in cfg:
                 self._runtime_config[key] = cfg.get(key)
+
+        # ── 可折叠模块：恢复上次的展开/收起状态 ──
+        ui_sections = cfg.get("ui_sections")
+        if isinstance(ui_sections, dict):
+            for name, sec in getattr(self, "_sections", {}).items():
+                if name in ui_sections:
+                    state = bool(ui_sections[name])
+                    sec.set_collapsed(state, notify=False)
+                    self._ui_section_state[name] = state
+            self._refresh_scrollregion()
 
         self._sync_provider_state()
         self._sync_filler_state()

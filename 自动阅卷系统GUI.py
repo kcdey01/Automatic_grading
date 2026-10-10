@@ -77,14 +77,25 @@ class AutoScoringSystem:
         self.on_score_callback = on_score_callback
         self.blank_threshold = float(blank_threshold)
 
+    # 空白复核参数：页面切换/图片加载中可能截到"发白/发淡"的过渡帧，
+    # 单帧灰度波动会低于阈值；疑似空白时等待重拍复核，真实空白卷重拍后依旧偏低。
+    _BLANK_RECHECK_ATTEMPTS = 6   # 疑似空白时最多重拍次数
+    _BLANK_RECHECK_DELAY = 1.0    # 每次重拍前等待的秒数
+
     @staticmethod
-    def _is_blank_image(image_path: str, threshold: float = 15.0) -> bool:
-        """检测图片是否接近空白（基于像素亮度标准差）。阈值 15 以下判定为空白。"""
+    def _gray_stddev(image) -> float:
+        """计算图像灰度波动（亮度标准差）。image 可为文件路径或 PIL 图像。"""
         from PIL import Image, ImageStat
 
-        with Image.open(image_path) as img:
-            stat = ImageStat.Stat(img.convert("L"))
-        return float(stat.stddev[0]) < threshold
+        if isinstance(image, (str, Path)):
+            with Image.open(image) as img:
+                return float(ImageStat.Stat(img.convert("L")).stddev[0])
+        return float(ImageStat.Stat(image.convert("L")).stddev[0])
+
+    @staticmethod
+    def _is_blank_image(image_path: str, threshold: float = 15.0) -> bool:
+        """检测图片是否接近空白（基于像素亮度标准差）。低于阈值判定为空白。"""
+        return AutoScoringSystem._gray_stddev(image_path) < threshold
 
     def _notify(self, title: str, message: str, level: str = "info"):
         """发送弹窗+系统通知（回调由上层注入，负责线程安全与降级）。"""
@@ -97,16 +108,45 @@ class AutoScoringSystem:
         except Exception as e:
             print(f"[通知] 发送失败：{e}")
 
+    def _capture_with_blank_recheck(self, qid, filename):
+        """截图并做空白复核：疑似空白时等待重拍，确认稳定后才按空白处理。
+
+        题目切换、图片加载中可能截到"发白/发淡"的过渡帧（灰度波动异常低），
+        直接判 0 会把有作答的卷子误判为空白；真实空白卷重拍后波动依旧偏低。
+        采用的那一帧始终覆盖保存到 filename。
+        返回 (是否确认为空白, 最后一次截图的灰度波动值)。
+        """
+        threshold = self.blank_threshold
+        image = self.screenshot_tool.capture_current_question()
+        stddev = self._gray_stddev(image)
+        self.screenshot_tool.save_image(image, filename)
+        if stddev >= threshold:
+            return False, stddev
+
+        print(f"[空白检测] 题目 {qid} 首次截图灰度波动 {stddev:.1f} < 阈值 {threshold:.1f}，疑似过渡帧，等待重拍复核…")
+        for attempt in range(1, self._BLANK_RECHECK_ATTEMPTS + 1):
+            time.sleep(self._BLANK_RECHECK_DELAY)
+            image = self.screenshot_tool.capture_current_question()
+            stddev = self._gray_stddev(image)
+            self.screenshot_tool.save_image(image, filename)
+            if stddev >= threshold:
+                print(f"[空白检测] 题目 {qid} 第 {attempt} 次重拍恢复（波动 {stddev:.1f} ≥ 阈值 {threshold:.1f}），继续 AI 评分")
+                return False, stddev
+            print(f"[空白检测] 题目 {qid} 第 {attempt} 次重拍仍接近空白（波动 {stddev:.1f}）")
+        return True, stddev
+
     def _process_one_question(self, question_index=None):
         started = time.perf_counter()
-        image = self.screenshot_tool.capture_current_question()
         qid = question_index if question_index is not None else "single"
         filename = str(self.capture_dir / f"question_{qid}_{int(time.time())}.jpg")
-        self.screenshot_tool.save_image(image, filename)
 
-        # 空白卷检测：跳过 AI 节省开销，直接给 0 分
-        if self._is_blank_image(filename, threshold=self.blank_threshold):
-            print(f"[空白检测] 题目 {qid} 截图接近空白（阈值 {self.blank_threshold:.1f}），直接判定 0 分，跳过 AI 评分")
+        # 空白卷检测：跳过 AI 节省开销，直接给 0 分；疑似空白时先重拍复核，防过渡帧误判
+        is_blank, stddev = self._capture_with_blank_recheck(qid, filename)
+        if is_blank:
+            print(
+                f"[空白检测] 题目 {qid} 截图接近空白（灰度波动 {stddev:.1f} < 阈值 {self.blank_threshold:.1f}，"
+                f"重拍复核 {self._BLANK_RECHECK_ATTEMPTS} 次仍为空白），直接判定 0 分，跳过 AI 评分"
+            )
             self.filler.config["batch_mode"] = self.batch_mode
             self.filler.fill_score(0)
             return 0

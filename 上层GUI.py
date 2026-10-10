@@ -13,7 +13,7 @@
 python 上层GUI.py
 """
 
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -2645,6 +2645,30 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("测试失败", str(e))
 
+    @staticmethod
+    def _gray_stddev(image) -> float:
+        """计算图像灰度波动（亮度标准差）。"""
+        from PIL import ImageStat
+
+        return float(ImageStat.Stat(image.convert("L")).stddev[0])
+
+    def _dual_capture_stddev(self, sys_):
+        """连续截两帧（间隔 1 秒），返回 (波动1, 波动2, 第二帧图像)。
+
+        单帧可能截到页面切换/加载中的过渡帧，读数偏低；双帧对比既能量出更稳定的
+        读数，也能暴露"画面仍在变化"的情况，避免灰度测试/阈值校准被过渡帧带偏。
+        """
+        img1 = sys_.screenshot_tool.capture_current_question()
+        if img1 is None:
+            raise ValueError("没有拿到截图，请先选择截图区域或检查截图权限。")
+        std1 = self._gray_stddev(img1)
+        time.sleep(1.0)
+        img2 = sys_.screenshot_tool.capture_current_question()
+        if img2 is None:
+            raise ValueError("没有拿到截图，请先选择截图区域或检查截图权限。")
+        std2 = self._gray_stddev(img2)
+        return std1, std2, img2
+
     def _test_blank_detection(self):
         try:
             sys_ = self._ensure_system()
@@ -2653,20 +2677,26 @@ class App(tk.Tk):
             return
 
         try:
-            img = sys_.screenshot_tool.capture_current_question()
-            if img is None:
-                raise ValueError("没有拿到截图，请先选择截图区域或检查截图权限。")
+            std1, std2, img2 = self._dual_capture_stddev(sys_)
             path = self.capture_dir / f"__blank_test_{int(time.time())}.png"
-            img.save(path)
+            img2.save(path)
 
-            from PIL import ImageStat
-            stat = ImageStat.Stat(img.convert("L"))
-            stddev = float(stat.stddev[0])
             threshold = self._get_blank_threshold()
+            stddev = max(std1, std2)
             is_blank = stddev < threshold
             result = "空白" if is_blank else "非空白"
-            msg = f"灰度波动：{stddev:.1f}\n当前阈值：{threshold:.1f}\n判定结果：{result}\n截图已保存：{path}"
-            print(f"[空白检测测试] 灰度波动={stddev:.1f} 阈值={threshold:.1f} 判定={result} 文件={path}")
+            unstable = abs(std1 - std2) > 3.0
+            msg = (
+                f"波动1：{std1:.1f}\n波动2：{std2:.1f}\n采用波动：{stddev:.1f}（取较大值）\n"
+                f"当前阈值：{threshold:.1f}\n判定结果：{result}"
+            )
+            if unstable:
+                msg += "\n\n提示：两次读数差异较大，画面可能正在切换或加载，建议稍等后重测。"
+            msg += f"\n截图已保存：{path}"
+            print(
+                f"[空白检测测试] 波动1={std1:.1f} 波动2={std2:.1f} 采用={stddev:.1f} "
+                f"阈值={threshold:.1f} 判定={result}{' 画面变化中' if unstable else ''} 文件={path}"
+            )
             messagebox.showinfo("空白检测测试", msg)
         except Exception as e:
             messagebox.showerror("测试失败", str(e))
@@ -2678,21 +2708,27 @@ class App(tk.Tk):
             messagebox.showerror("配置不完整", str(e))
             return
         try:
-            img = sys_.screenshot_tool.capture_current_question()
-            if img is None:
-                raise ValueError("没有拿到截图，请先选择截图区域或检查截图权限。")
+            std1, std2, img2 = self._dual_capture_stddev(sys_)
             path = self.capture_dir / f"__blank_mark_{int(time.time())}.png"
-            img.save(path)
-            from PIL import ImageStat
-            stat = ImageStat.Stat(img.convert("L"))
-            stddev = float(stat.stddev[0])
+            img2.save(path)
+            stddev = max(std1, std2)
             new_threshold = round(stddev + 2.0, 1)
             new_threshold = max(0.0, min(40.0, new_threshold))
             self._set_blank_threshold(new_threshold)
             if self.system is not None:
                 self.system.blank_threshold = new_threshold
-            print(f"[标记空白卷] 灰度波动={stddev:.1f} 已设置阈值={new_threshold:.1f} 文件={path}")
-            messagebox.showinfo("标记空白卷", f"已识别空白卷灰度波动：{stddev:.1f}\n已自动设置空白阈值为：{new_threshold:.1f}\n\n后续灰度波动低于此值的截图将被判定为空白卷。")
+            unstable = abs(std1 - std2) > 3.0
+            print(
+                f"[标记空白卷] 波动1={std1:.1f} 波动2={std2:.1f} 采用={stddev:.1f} "
+                f"已设置阈值={new_threshold:.1f}{' 画面变化中' if unstable else ''} 文件={path}"
+            )
+            msg = (
+                f"已识别空白卷灰度波动：{stddev:.1f}（波动1 {std1:.1f} / 波动2 {std2:.1f}）\n"
+                f"已自动设置空白阈值为：{new_threshold:.1f}\n\n后续灰度波动低于此值的截图将被判定为空白卷。"
+            )
+            if unstable:
+                msg += "\n提示：两次读数差异较大，画面可能正在变化，建议稍等后重新标记。"
+            messagebox.showinfo("标记空白卷", msg)
         except Exception as e:
             messagebox.showerror("标记失败", str(e))
 
